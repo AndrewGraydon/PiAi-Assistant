@@ -1,0 +1,22 @@
+[Unit]
+Description=PiAi ASR Service (Whisper on LLM8850)
+Documentation=https://github.com/PiSugar/whisper.axcl
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/PiAi/whisper.axcl
+ExecStart=/usr/bin/python3 server/main.py
+Environment=WHISPER_PORT=8801
+
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=piAi-asr
+
+[Install]
+WantedBy=multi-user.target

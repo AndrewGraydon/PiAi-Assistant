@@ -1,0 +1,26 @@
+[Unit]
+Description=PiAi Orchestrator
+After=network.target assistant-display.service assistant-llm.service assistant-asr.service assistant-tts.service
+Wants=assistant-display.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/PiAi/assistant
+EnvironmentFile=/home/pi/PiAi/assistant/.env
+
+# Wait 5s after dependencies start before launching
+# (health checks inside main.py wait up to 180s for NPU services)
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/python3 main.py --config config.yaml
+
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=piAi-orchestrator
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,98 @@
+services:
+  llm:
+    host: http://localhost:8000
+    temperature: 0.7
+    top_k: 40
+    enable_thinking: false
+    poll_interval_ms: 500
+    max_tool_rounds: 5            # Max tool-chain iterations per query
+
+  asr:
+    host: http://localhost:8801
+    language: en
+    timeout_s: 120
+
+  tts:
+    host: http://localhost:8803
+    voice: af_heart
+    speed: 1.0
+    language: en
+    sample_rate: 24000
+
+  display:
+    host: 127.0.0.1
+    port: 12345
+
+  vision:
+    provider: placeholder         # placeholder | gemini | openai | anthropic
+    cloud_host: null
+
+n8n:
+  enabled: false                  # Set true + fill url/token to activate
+  url: http://localhost:5678
+  webhook_base: http://localhost:5678/webhook
+  token: ""                       # Override with N8N_TOKEN in .env
+  timeout_s: 30
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  device_name: null               # null = auto-detect WM8960; or e.g. "plughw:1,0"
+  vad_aggressiveness: 2           # 0 (least) to 3 (most aggressive)
+  silence_timeout_s: 2.0
+  max_record_s: 30
+
+memory:
+  enabled: true
+  db_path: ./data/chroma
+  collection: assistant_memory
+  embedding_model: all-MiniLM-L6-v2
+  top_k: 3
+  score_threshold: 0.65
+  default_hint_ttl_s: 604800      # 7 days
+
+tools:
+  data_cache_size: 3              # ToolDataCache rolling window size
+  builtin:
+    capture_image: true
+    home_automation: true
+
+assistant:
+  name: Jarvis
+  system_prompt: |
+    You are Jarvis, a helpful local AI assistant running on a Raspberry Pi.
+    Be concise — your responses are spoken aloud via text-to-speech.
+    Avoid markdown, bullet points, and special characters in your responses.
+    Speak naturally, as if having a conversation.
+
+    You have access to tools. Use them only when the user's request genuinely requires it.
+    To call a tool, output a <tool_call> block containing valid JSON — nothing else on those lines:
+
+    Tool: capture_image
+    Use when the user asks what you see, describes their surroundings, or wants visual information.
+    <tool_call>{"name": "capture_image", "arguments": {"question": "what to look for"}}</tool_call>
+
+    Tool: home_automation
+    Use when the user wants to control lights, heating, or other smart home devices.
+    <tool_call>{"name": "home_automation", "arguments": {"action": "turn on", "device": "lights"}}</tool_call>
+
+    Only call one tool at a time. After receiving the tool result, provide your final spoken response.
+  tools_enabled: true
+  thinking_indicator: true
+
+display:
+  brightness: 80
+  idle_emoji: "😴"
+  listen_emoji: "😐"
+  think_emoji: "🤔"
+  speak_emoji: "🗣️"
+  idle_color: "#000055"
+  listen_color: "#00ff00"
+  think_color: "#ff6800"
+  speak_color: "#0055ff"
+
+paths:
+  recordings_dir: ./data/recordings
+  tts_dir: ./data/tts
+  captures_dir: ./data/captures
+  logs_dir: ./data/logs
