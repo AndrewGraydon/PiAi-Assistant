@@ -4,10 +4,13 @@ Button-triggered audio recorder for PiAi Assistant.
 Uses sounddevice for capture (PortAudio → ALSA) and webrtcvad for
 Voice Activity Detection to stop recording automatically after silence.
 
-ALSA device notes:
-  - Use "plughw:N,0" (not "hw:N,0") to enable ALSA rate conversion
+ALSA / sounddevice device notes:
+  - sounddevice (PortAudio) does NOT accept "plughw:N,0" strings — those are
+    raw ALSA device names. sounddevice matches by device name substring or index.
   - WM8960 on Whisplay HAT registers as "wm8960soundcard" in /proc/asound/cards
+    and as "wm8960-soundcard" in sounddevice's device list.
   - device_name: null in config.yaml triggers auto-detection of the WM8960 card
+    by name substring match against sounddevice's device list.
 
 webrtcvad frame size constraint:
   At 16000 Hz with 30ms frames: blocksize = 16000 * 30 / 1000 = 480 samples
@@ -34,20 +37,26 @@ _FRAME_MS = 30
 
 def _detect_wm8960_device() -> Optional[str]:
     """
-    Auto-detect the WM8960 sound card index from /proc/asound/cards.
-    Returns a plughw device string like "plughw:1,0" or None if not found.
+    Auto-detect the WM8960 sound card by searching sounddevice's device list
+    for a name containing 'wm8960'.
+
+    sounddevice (PortAudio) does not accept raw ALSA strings like "plughw:N,0".
+    We match by name substring and return the sounddevice device name string,
+    which PortAudio will resolve correctly. Returns None to use the system
+    default if not found.
     """
     try:
-        with open("/proc/asound/cards", "r") as f:
-            for line in f:
-                if "wm8960soundcard" in line.lower():
-                    card_num = line.strip().split()[0]
-                    device = f"plughw:{card_num},0"
-                    log.info("Auto-detected WM8960 audio device: %s", device)
-                    return device
-    except FileNotFoundError:
-        pass
-    log.debug("WM8960 not found in /proc/asound/cards (normal on dev machine)")
+        import sounddevice as sd
+        devices = sd.query_devices()
+        for i, d in enumerate(devices):
+            if "wm8960" in d["name"].lower() and d["max_input_channels"] > 0:
+                log.info(
+                    "Auto-detected WM8960 audio device: [%d] %s", i, d["name"]
+                )
+                return d["name"]
+    except Exception as e:
+        log.debug("sounddevice device query failed: %s", e)
+    log.debug("WM8960 not found in sounddevice list (normal on dev machine) — using default")
     return None
 
 
@@ -67,6 +76,8 @@ class AudioRecorder:
         self.max_record_s = max_record_s
 
         # Resolve device name
+        # If config specifies a device, use it as-is.
+        # Otherwise auto-detect WM8960 by sounddevice name (not ALSA plughw string).
         if device_name:
             self.device_name = device_name
         else:

@@ -31,13 +31,21 @@ set -a
 source "$SCRIPT_DIR/.env"
 set +a
 
-# --- Set WM8960 speaker volume ---
+# --- Set WM8960 audio levels ---
 CARD_INDEX=$(awk '/wm8960soundcard/ {print $1}' /proc/asound/cards 2>/dev/null | head -n1 || true)
 if [ -n "$CARD_INDEX" ]; then
-    echo "[start.sh] Setting speaker volume (card $CARD_INDEX)..."
-    amixer -c "$CARD_INDEX" set Speaker 114 2>/dev/null || echo "[start.sh] Warning: amixer set failed (non-fatal)"
+    echo "[start.sh] Setting WM8960 audio levels (card $CARD_INDEX)..."
+    # Speaker output volume
+    amixer -c "$CARD_INDEX" cset name='Speaker Playback Volume' 114,114 2>/dev/null || \
+        amixer -c "$CARD_INDEX" set Speaker 114 2>/dev/null || true
+    # Microphone capture: max PGA gain, boost stage enabled
+    amixer -c "$CARD_INDEX" cset numid=1 63,63    2>/dev/null || true  # Capture Volume -> max
+    amixer -c "$CARD_INDEX" cset numid=9 3        2>/dev/null || true  # Left  Input Boost LINPUT1 -> +29dB
+    amixer -c "$CARD_INDEX" cset numid=8 3        2>/dev/null || true  # Right Input Boost RINPUT1 -> +29dB
+    amixer -c "$CARD_INDEX" cset numid=50 on      2>/dev/null || true  # Left  Input Mixer Boost Switch -> on
+    amixer -c "$CARD_INDEX" cset numid=51 on      2>/dev/null || true  # Right Input Mixer Boost Switch -> on
 else
-    echo "[start.sh] WARNING: WM8960 sound card not found — skipping volume setup"
+    echo "[start.sh] WARNING: WM8960 sound card not found — skipping audio setup"
 fi
 
 # --- Create runtime data directories ---
