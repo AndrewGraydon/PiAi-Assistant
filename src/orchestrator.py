@@ -343,14 +343,18 @@ class Orchestrator:
 
     def _run_tool_chain(self, utterance: str, system_prompt: str) -> str:
         """
-        Reset LLM with system_prompt, then run a tool-execution loop:
+        Run a tool-execution loop:
           1. Generate with current prompt
           2. If response contains <tool_call>: execute tool, inject result, loop
           3. If no tool call: strip think tags, return as final response
 
+        Note: we do NOT call llm.reset() here. The system prompt is baked into
+        the binary at startup via --system_prompt CLI arg. Calling reset()
+        destroys the KV cache and the system prompt context. reset() is only
+        used for KV cache error recovery.
+
         Runs up to config.llm.max_tool_rounds iterations.
         """
-        self.llm.reset(system_prompt)
         prompt = utterance
 
         for round_num in range(self.config.llm.max_tool_rounds):
