@@ -1,0 +1,23 @@
+[Unit]
+Description=PiAi LLM Service (Qwen3-4B on LLM8850)
+After=network.target
+# LLM takes ~2 minutes to initialise — other services start in parallel
+
+[Service]
+Type=simple
+User=andrew
+Group=andrew
+WorkingDirectory=/home/andrew/PiAi-Assistant
+ExecStart=/bin/bash /home/andrew/PiAi-Assistant/services/llm/serve.sh
+ExecStopPost=/bin/bash -c 'pkill -f "python qwen3_tokenizer_uid.py --port 12300" || true'
+
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=300
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=piAi-llm
+
+[Install]
+WantedBy=multi-user.target

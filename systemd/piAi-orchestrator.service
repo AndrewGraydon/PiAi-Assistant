@@ -1,0 +1,26 @@
+[Unit]
+Description=PiAi Assistant Orchestrator
+After=network.target piAi-llm.service piAi-asr.service piAi-tts.service
+Wants=piAi-llm.service piAi-asr.service piAi-tts.service
+
+[Service]
+Type=simple
+User=andrew
+Group=andrew
+WorkingDirectory=/home/andrew/PiAi-Assistant
+EnvironmentFile=/home/andrew/PiAi-Assistant/.env
+
+# Brief delay after dependencies start; health checks inside main.py
+# wait up to 180s for NPU services to be ready
+ExecStartPre=/bin/sleep 5
+ExecStart=/home/andrew/miniforge3/envs/piAi/bin/python /home/andrew/PiAi-Assistant/main.py --config /home/andrew/PiAi-Assistant/config.yaml
+
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=piAi-orchestrator
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+[Unit]
+Description=PiAi ASR Service (Whisper-Small on LLM8850)
+After=network.target
+
+[Service]
+Type=simple
+User=andrew
+Group=andrew
+WorkingDirectory=/home/andrew/PiAi-Assistant
+ExecStart=/bin/bash /home/andrew/PiAi-Assistant/services/asr/serve.sh
+
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=piAi-asr
+
+[Install]
+WantedBy=multi-user.target

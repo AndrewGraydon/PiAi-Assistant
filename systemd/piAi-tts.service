@@ -1,14 +1,13 @@
 [Unit]
 Description=PiAi TTS Service (Kokoro on LLM8850)
-Documentation=https://github.com/m5stack/kokoro.LM8850
 After=network.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/PiAi/kokoro.LM8850
-ExecStart=/usr/bin/python3 kokoro_svr.py --port 8803
+User=andrew
+Group=andrew
+WorkingDirectory=/home/andrew/PiAi-Assistant
+ExecStart=/bin/bash /home/andrew/PiAi-Assistant/services/tts/serve.sh
 
 Restart=on-failure
 RestartSec=10

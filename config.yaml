@@ -20,8 +20,10 @@ services:
     sample_rate: 24000
 
   display:
+    # host/port are unused — display is driven directly via WhisPlayBoard (GPIO/SPI)
+    # Kept for config compatibility only
     host: 127.0.0.1
-    port: 12345
+    port: 0
 
   vision:
     provider: placeholder         # placeholder | gemini | openai | anthropic

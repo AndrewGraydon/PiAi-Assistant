@@ -1,64 +1,69 @@
 #!/usr/bin/env bash
-# ============================================================
-# PiAi Assistant — convenience launcher
-# Starts the display sidecar then the orchestrator.
-# For production use, prefer the systemd services.
-# ============================================================
+# start.sh — Development/manual launcher for PiAi Assistant
+#
+# Starts the orchestrator only. Assumes the three NPU services are already
+# running (either via systemd or started manually):
+#   qwen3.service   → http://localhost:8000  (LLM)
+#   whisper.service → http://localhost:8801  (ASR)
+#   kokoro.service  → http://localhost:8803  (TTS)
+#
+# The display (LCD, RGB LED, button) is driven directly via WhisPlayBoard
+# GPIO — no sidecar process required.
+#
+# For production use, install the systemd unit files from systemd/ instead.
+# See docs/SETUP.md for full instructions.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# --- Detect WM8960 sound card and set volume ---
-CARD_INDEX=$(awk '/wm8960soundcard/ {print $1}' /proc/asound/cards 2>/dev/null | head -n1 || true)
-CARD_INDEX="${CARD_INDEX:-1}"
-echo "[start.sh] Using sound card index: $CARD_INDEX"
-amixer -c "$CARD_INDEX" set Speaker 114 2>/dev/null || echo "[start.sh] Warning: amixer set failed (non-fatal)"
-
-# --- Verify .env exists ---
+# --- Validate .env ---
 if [ ! -f "$SCRIPT_DIR/.env" ]; then
     echo "[start.sh] ERROR: .env not found."
     echo "           Copy .env.template to .env and fill in any required secrets."
     exit 1
 fi
 
-# --- Load .env into shell environment ---
+# --- Load .env ---
 set -a
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/.env"
 set +a
 
-# --- Locate the display sidecar ---
-# Expects the whisplay-ai-chatbot-llm8850 repo to be a sibling directory
-DISPLAY_REPO="$(dirname "$SCRIPT_DIR")/whisplay-ai-chatbot-llm8850/python"
-if [ ! -f "$DISPLAY_REPO/chatbot-ui.py" ]; then
-    echo "[start.sh] WARNING: Display sidecar not found at $DISPLAY_REPO/chatbot-ui.py"
-    echo "           Running without display. Clone whisplay-ai-chatbot-llm8850 as a sibling directory."
-    DISPLAY_PID=""
+# --- Set WM8960 speaker volume ---
+CARD_INDEX=$(awk '/wm8960soundcard/ {print $1}' /proc/asound/cards 2>/dev/null | head -n1 || true)
+if [ -n "$CARD_INDEX" ]; then
+    echo "[start.sh] Setting speaker volume (card $CARD_INDEX)..."
+    amixer -c "$CARD_INDEX" set Speaker 114 2>/dev/null || echo "[start.sh] Warning: amixer set failed (non-fatal)"
 else
-    echo "[start.sh] Starting display sidecar..."
-    CUSTOM_FONT_PATH="$DISPLAY_REPO/NotoSansSC-Bold.ttf" \
-        python3 "$DISPLAY_REPO/chatbot-ui.py" &
-    DISPLAY_PID=$!
-    echo "[start.sh] Display sidecar PID: $DISPLAY_PID"
-    # Give the socket time to bind
-    sleep 3
+    echo "[start.sh] WARNING: WM8960 sound card not found — skipping volume setup"
 fi
 
-# --- Cleanup function ---
+# --- Create runtime data directories ---
+mkdir -p "$SCRIPT_DIR/data/recordings" \
+         "$SCRIPT_DIR/data/tts" \
+         "$SCRIPT_DIR/data/captures" \
+         "$SCRIPT_DIR/data/logs"
+
+# --- Cleanup handler ---
 cleanup() {
     echo ""
     echo "[start.sh] Shutting down..."
-    if [ -n "${DISPLAY_PID:-}" ] && kill -0 "$DISPLAY_PID" 2>/dev/null; then
-        kill "$DISPLAY_PID"
-    fi
     exit 0
 }
 trap cleanup SIGINT SIGTERM
 
+# --- Select Python interpreter (prefer piAi conda env) ---
+PYTHON="$HOME/miniforge3/envs/piAi/bin/python"
+if [ ! -f "$PYTHON" ]; then
+    echo "[start.sh] WARNING: piAi conda env not found at $PYTHON, falling back to python3"
+    PYTHON=python3
+fi
+
 # --- Start orchestrator ---
-# Health checks inside main.py wait up to 180s for NPU services.
-echo "[start.sh] Starting orchestrator..."
-python3 "$SCRIPT_DIR/main.py" --config "$SCRIPT_DIR/config.yaml" "$@"
+# Health checks inside main.py wait up to 180s for NPU services to be ready.
+echo "[start.sh] Starting PiAi Assistant orchestrator..."
+"$PYTHON" "$SCRIPT_DIR/main.py" --config "$SCRIPT_DIR/config.yaml" "$@"
 
 cleanup
