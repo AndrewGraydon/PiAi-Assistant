@@ -10,17 +10,15 @@ The most common path — user asks a question, assistant responds in speech.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  User                Pi GPIO / chatbot-ui.py      Orchestrator      │
+│  User                WhisPlayBoard GPIO        Orchestrator          │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
 │  [presses button]                                                   │
 │       │                                                             │
 │       ▼                                                             │
 │           GPIO interrupt fires                                      │
-│           chatbot-ui.py sends ──────────────────► recv thread      │
-│           {"event":"button_pressed"}                 │              │
-│                                                      │              │
-│                                                 _on_button_pressed()│
+│           WhisPlayBoard callback ──────────────► _on_button_pressed()│
+│           (in-process, no TCP)                       │              │
 │                                                      │              │
 │                                          ┌─── IDLE → RECORDING ───┐ │
 │                                          │   display: 😐 green    │ │
@@ -136,6 +134,7 @@ Utterance: "What's on my desk?"
               _parse_tool_call() ──► tool_call found
                          │
               display.send({"text": "Using capture_image..."})
+              WhisPlayBoard LCD updated in-process
                          │
               tool_registry.call("capture_image",
                                  {"question": "what objects are on the desk?"})
@@ -275,19 +274,21 @@ User presses button mid-response to cancel.
 State: SPEAKING
   │
   ▼
-chatbot-ui.py GPIO ──► {"event":"button_pressed"} ──► _on_button_pressed()
-                                                            │
-                                                    interrupt_flag.set()
-                                                    player.stop()          ← aplay terminated
-                                                    _transition(IDLE)
-                                                    pipeline_running.clear()
-                                                            │
-                                                    LLM poll loop checks interrupt_flag
-                                                    ──► exits immediately if mid-generation
-                                                            │
-                                                    _speak_response() checks interrupt_flag
-                                                    ──► skips remaining sentences
+WhisPlayBoard GPIO interrupt ──► _on_button_pressed() (in-process callback)
+                                            │
+                                    interrupt_flag.set()
+                                    player.stop()          ← aplay terminated
+                                    _transition(IDLE)
+                                    pipeline_running.clear()
+                                            │
+                                    LLM poll loop checks interrupt_flag
+                                    ──► exits immediately if mid-generation
+                                            │
+                                    _speak_response() checks interrupt_flag
+                                    ──► skips remaining sentences
 ```
+
+Note: Because WhisPlayBoard fires the callback in-process via a GPIO interrupt thread, there is no TCP round-trip — interrupt latency is sub-millisecond from button press to `interrupt_flag.set()`.
 
 ---
 
@@ -350,7 +351,7 @@ Turn 2:
 
 ---
 
-## Service Health Check Flow
+## 7. Service Health Check Flow
 
 At startup, `wait_for_services()` polls all three NPU services:
 
@@ -371,4 +372,38 @@ wait_for_services(llm_host, asr_host, tts_host, timeout=180s)
 All services ready ──► Orchestrator.run()
      │
      (or RuntimeError if timeout exceeded)
+```
+
+The NPU services (`piAi-llm`, `piAi-asr`, `piAi-tts`) are managed by systemd and start automatically before `piAi-orchestrator` thanks to `After=` and `Wants=` dependencies in the unit files.
+
+---
+
+## 8. Display Update Flow
+
+How the orchestrator updates the Whisplay HAT display during state transitions.
+
+```
+Orchestrator._transition(new_state)
+     │
+     ▼
+DisplayClient.send({
+    "status":     "thinking",
+    "emoji":      "🤔",
+    "RGB":        "#ff6800",
+    "text":       "Thinking...",
+    "brightness": 80
+})
+     │  (all in-process — no network hop)
+     ▼
+DisplayClient._send_to_board(payload)  [thread-safe lock]
+     │
+     ├─ board.set_backlight(brightness)   ← PWM to LCD backlight
+     ├─ board.set_rgb(r, g, b)            ← PWM to RGB LED
+     └─ _render_lcd(board, emoji, text)
+           │
+           ├─ PIL.Image(240×280, black)
+           ├─ Draw emoji at 72pt (centre)
+           ├─ Draw text at 22pt (bottom)
+           ├─ Convert to RGB565 bytes
+           └─ board.draw_image(0, 0, 240, 280, data)  ← SPI to LCD
 ```

@@ -2,7 +2,7 @@
 
 ## Overview
 
-PiAi Assistant is a single-process Python orchestrator that coordinates five pre-existing HTTP services running on the LLM8850 NPU. The orchestrator owns the conversation state machine, manages audio I/O, retrieves memory context, executes tool calls, and drives the Whisplay display.
+PiAi Assistant is a single-process Python orchestrator that coordinates three HTTP services running on the LLM8850 NPU, and drives the Whisplay HAT display hardware directly via GPIO/SPI.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -17,18 +17,19 @@ PiAi Assistant is a single-process Python orchestrator that coordinates five pre
 │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │  │
 │  │  │ Recorder │  │  Memory  │  │  Tools   │  │  Display │  │  │
 │  │  │  (VAD)   │  │(ChromaDB)│  │ Registry │  │  Client  │  │  │
-│  │  └──────────┘  └──────────┘  └──────────┘  └──────────┘  │  │
-│  └──────────────────────┬─────────────────────────┬───────────┘  │
-│                         │ HTTP                     │ TCP :12345   │
-│            ┌────────────┼────────────┐            │              │
-│            │            │            │            │              │
-│     ┌──────▼───┐ ┌──────▼───┐ ┌─────▼────┐ ┌────▼──────────┐   │
-│     │  Whisper │ │ Qwen3-4B │ │  Kokoro  │ │ chatbot-ui.py │   │
-│     │  ASR     │ │  LLM     │ │  TTS     │ │ Display Sidecar│   │
-│     │  :8801   │ │  :8000   │ │  :8803   │ │  (Python)     │   │
-│     └──────────┘ └──────────┘ └──────────┘ └───────────────┘   │
+│  │  └──────────┘  └──────────┘  └──────────┘  └────┬─────┘  │  │
+│  └──────────────────────┬─────────────────────────────────────┘  │
+│                         │ HTTP                     │ GPIO/SPI     │
+│            ┌────────────┼────────────┐             │              │
+│            │            │            │             │              │
+│     ┌──────▼───┐ ┌──────▼───┐ ┌─────▼────┐ ┌─────▼──────────┐  │
+│     │  Whisper │ │ Qwen3-4B │ │  Kokoro  │ │  WhisPlayBoard │  │
+│     │  ASR     │ │  LLM     │ │  TTS     │ │  LCD + LED     │  │
+│     │  :8801   │ │  :8000   │ │  :8803   │ │  + Button      │  │
+│     └──────────┘ └──────────┘ └──────────┘ └───────────────-┘  │
 │                                                                  │
-│     All AI services run on LLM8850 NPU (8GB VRAM)               │
+│     AI services run on LLM8850 NPU (8GB VRAM)                   │
+│     Display driven in-process via services/display/WhisPlay.py  │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -42,7 +43,7 @@ The central coordinator. Runs in a single process with a background pipeline thr
 
 **Responsibilities:**
 - Own the conversation state machine
-- Connect to the display sidecar and listen for button events
+- Register a GPIO button callback via WhisPlayBoard and listen for button events
 - Launch the voice pipeline on button press
 - Coordinate all service calls in the correct order
 - Manage tool call parsing and execution loop
@@ -89,14 +90,14 @@ Thin HTTP wrappers around the pre-existing NPU servers. Each client is stateless
 | `ASRClient` | `asr.py` | POST `/recognize` to Whisper server |
 | `LLMClient` | `llm.py` | reset / generate / poll loop to Qwen3 binary |
 | `TTSClient` | `tts.py` | POST `/synthesize` to Kokoro server |
-| `DisplayClient` | `display.py` | TCP socket to `chatbot-ui.py` sidecar |
+| `DisplayClient` | `display.py` | In-process driver via `WhisPlayBoard` (GPIO/SPI) |
 | `VisionProvider` | `vision.py` | ABC for cloud vision (placeholder default) |
 
 ---
 
 ### LLM Client — Custom Poll Protocol
 
-The Qwen3-4B inference binary does **not** use the OpenAI API. It uses a bespoke three-step protocol:
+The Qwen3-4B inference binary (`main_api_axcl_aarch64`) does **not** use the OpenAI API. It uses a bespoke three-step protocol:
 
 ```
 POST /api/reset    {"system_prompt": "..."}   ← sets context, called once per query
@@ -119,7 +120,7 @@ The orchestrator accumulates all `response` chunks. The poll loop checks `interr
 - Frame size: 480 samples (30ms) — required by webrtcvad
 - VAD loop: tracks `speech_started` flag and `silent_frames` counter
 - Stops after `silence_timeout_s` (default 2s) of continuous silence post-speech
-- Auto-detects WM8960 card index from `/proc/asound/cards`
+- Auto-detects WM8960 card index from `/proc/asound/cards` (card 2 on this Pi)
 - Uses `plughw:N,0` (not `hw:N,0`) to enable ALSA rate conversion
 
 **Player (`player.py`):**
@@ -203,22 +204,31 @@ Security: credentials stay encrypted in n8n. The orchestrator only sends paramet
 
 ---
 
-### Display Sidecar
+### Display Driver (`src/services/display.py`)
 
-`chatbot-ui.py` (from the `whisplay-ai-chatbot-llm8850` reference repo) is a separate Python process that owns all GPIO, SPI, and LCD rendering. It exposes a **TCP socket on port 12345** using newline-delimited JSON.
+The `DisplayClient` drives the Whisplay HAT display hardware **in-process** via `WhisPlayBoard` (located at `services/display/WhisPlay.py`). There is no separate sidecar process or TCP socket.
 
-**Our `DisplayClient` sends:**
-```json
-{"status": "thinking", "emoji": "🤔", "RGB": "#ff6800", "text": "Thinking...", "brightness": 80}
-```
+**Hardware controlled:**
+- **LCD** (240×280, SPI): renders emoji (72pt) + status text (22pt) using Pillow → RGB565 → `board.draw_image()`
+- **RGB LED** (GPIO PWM): set via `board.set_rgb(r, g, b)` — colour reflects current state
+- **Physical button** (GPIO interrupt): registered via `board.on_button_press(callback)` — fires callback in a new thread
 
-**It receives:**
-```json
-{"event": "button_pressed"}
-{"event": "button_released"}
-```
+**Graceful fallback:** When `RPi.GPIO` / `spidev` are unavailable (dev machine), all methods no-op silently.
 
-The `DisplayClient` connects with retry (15 attempts × 3s), runs a daemon recv thread, and fires the registered button callback. All sends are fire-and-forget (no ACK wait).
+**Key methods:**
+- `connect_with_retry(max_retries=3)` — initialises `WhisPlayBoard()`, sets initial backlight
+- `disconnect()` — calls `board.cleanup()` to release GPIO
+- `send(payload)` — thread-safe; updates backlight, RGB LED, and renders LCD from `status`/`emoji`/`text` fields
+- `start_event_listener(callback)` — registers GPIO button interrupt; no daemon thread needed
+
+**State → display mapping** (from `config.yaml`):
+
+| State | Emoji | LED colour | Brightness |
+|---|---|---|---|
+| IDLE | 😴 | `#000055` | 80% |
+| RECORDING | 😐 | `#00ff00` | 80% |
+| THINKING | 🤔 | `#ff6800` | 80% |
+| SPEAKING | 🗣️ | `#0055ff` | 80% |
 
 ---
 
@@ -267,32 +277,42 @@ All relative paths in `config.yaml` are resolved to absolute paths at load time.
 ```
 start.sh
   │
-  ├─ Detect WM8960 card index → set speaker volume via amixer
+  ├─ Validate .env exists
   ├─ Source .env
-  ├─ Launch chatbot-ui.py (display sidecar) → background
-  ├─ sleep 3 (wait for socket to bind)
-  └─ python3 main.py
+  ├─ Detect WM8960 card index (card 2) → set speaker volume via amixer
+  ├─ Create data/ subdirectories
+  └─ ~/miniforge3/envs/piAi/bin/python main.py --config config.yaml
         │
-        ├─ load_config()     — parse config.yaml + .env
-        ├─ setup_logging()   — console + rotating file
-        ├─ ensure_data_dirs()— create data/ subdirs
-        ├─ wait_for_services()— poll LLM/ASR/TTS health (up to 180s)
+        ├─ load_config()       — parse config.yaml + .env
+        ├─ setup_logging()     — console + rotating file
+        ├─ ensure_data_dirs()  — create data/ subdirs
+        ├─ wait_for_services() — poll LLM/ASR/TTS health (up to 180s)
         └─ Orchestrator.run()
               │
               ├─ Embedder()        — load sentence-transformers (~5-30s first run)
               ├─ MemoryStore()     — open/create ChromaDB collection
               ├─ register_tools()  — built-ins + n8n discovery
-              ├─ display.connect_with_retry()
+              ├─ display.connect_with_retry()  ← initialises WhisPlayBoard GPIO
               ├─ _transition(IDLE) — update display
-              └─ display.start_event_listener()  ← blocks here
+              └─ display.start_event_listener()  ← registers GPIO button interrupt
+                    (orchestrator then runs its main event loop)
 ```
+
+NPU services are started separately via systemd before the orchestrator:
+
+| Service | Unit file | Start time |
+|---|---|---|
+| `piAi-llm` | `systemd/piAi-llm.service` | ~133s (Qwen3-4B load) |
+| `piAi-asr` | `systemd/piAi-asr.service` | ~10s |
+| `piAi-tts` | `systemd/piAi-tts.service` | ~10s |
+| `piAi-orchestrator` | `systemd/piAi-orchestrator.service` | after all above |
 
 ---
 
 ## Design Decisions
 
 ### Why not OpenAI API format?
-The `main_axcl_aarch64` binary uses a bespoke reset/generate/poll protocol, not `/chat/completions`. The `LLMClient` is purpose-built for this API.
+The `main_api_axcl_aarch64` binary uses a bespoke reset/generate/poll protocol, not `/chat/completions`. The `LLMClient` is purpose-built for this API.
 
 ### Why sequential TTS (not parallel with generation)?
 Generating the full response first, then splitting into sentences for TTS, is simpler and more reliable at Qwen3-4B's 3.65 tok/s speed. Parallel streaming+TTS adds complexity for minimal perceived latency benefit at this generation rate.
@@ -305,3 +325,6 @@ Semantic search is necessary for useful memory retrieval — keyword matching wo
 
 ### Why n8n for tools?
 Inspired by CAAL: n8n decouples tool implementation from agent code, stores credentials securely, and allows non-developers to add automations. New tools require zero Python changes.
+
+### Why WhisPlayBoard in-process instead of a TCP sidecar?
+The original reference design used a separate `chatbot-ui.py` process with a TCP socket. Our `Whisplay` repo provides `WhisPlay.py` — a clean Python driver for the same hardware. Running it in-process eliminates a process, a socket, a port, retry logic, and all serialisation overhead. The GPIO button callback fires directly into the orchestrator thread.
