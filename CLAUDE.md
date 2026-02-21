@@ -9,8 +9,9 @@ This file gives Claude full project context for every session. Read this before 
 **PiAi Assistant** is a voice-first, mostly-offline AI assistant running on a **Raspberry Pi 5** with an **M5Stack LLM8850 NPU** (M.2 2242, 8GB VRAM). All speech recognition, LLM inference, and text-to-speech run locally on the NPU. Vision falls back to a cloud provider.
 
 **GitHub repo:** `https://github.com/AndrewGraydon/PiAi-Assistant.git`
-**Local path:** `/Users/andrew.graydon/Documents/Code/Python/PiAi/assistant/`
-**Reference repos:** `/Users/andrew.graydon/Documents/Code/Python/PiAi/` (read-only, do not modify)
+**Local Mac path:** `/Users/andrew.graydon/Documents/Code/Python/PiAi/assistant/`
+**Pi path:** `/home/andrew/PiAi-Assistant/`
+**Pi hostname:** `aiserver` — `ssh andrew@10.10.0.129`
 
 ---
 
@@ -18,9 +19,9 @@ This file gives Claude full project context for every session. Read this before 
 
 | Component | Details |
 |---|---|
-| Host | Raspberry Pi 5 (8GB), Debian 12 / Ubuntu 22.04 |
+| Host | Raspberry Pi 5 (8GB), Debian 12, hostname: `aiserver` |
 | NPU | M5Stack LLM8850 (M.2 2242, 8GB VRAM, 24 TOPS) via dual M.2 HAT |
-| HAT | Whisplay — 240×280 LCD, RGB LED, WM8960 audio codec, physical button |
+| HAT | Whisplay — 240×280 LCD, RGB LED, WM8960 audio codec (card index **2**), physical button |
 | Camera | Freenove FNK0085 CSI module |
 | Power | 5V/3A **non-PD** adapter (PD causes instability under NPU load) |
 
@@ -30,31 +31,37 @@ This file gives Claude full project context for every session. Read this before 
 
 All AI models run on the LLM8850. The orchestrator talks to them over localhost HTTP.
 
-| Service | Model | Port | VRAM |
-|---|---|---|---|
-| LLM | Qwen3-4B (w8a16 int8) | 8000 | ~6.3 GB |
-| ASR | Whisper-Small | 8801 | ~0.5 GB |
-| TTS | Kokoro-82M | 8803 | ~0.3 GB |
-| Display sidecar | `chatbot-ui.py` | 12345 (TCP) | CPU only |
-| LLM tokenizer | qwen3_tokenizer_uid.py | 12300 | internal |
+| Service | Model | Port | VRAM | systemd unit |
+|---|---|---|---|---|
+| LLM | Qwen3-4B (w8a16 int8) | 8000 | ~6.3 GB | `piAi-llm.service` |
+| ASR | Whisper-Small | 8801 | ~0.5 GB | `piAi-asr.service` |
+| TTS | Kokoro-82M | 8803 | ~0.3 GB | `piAi-tts.service` |
+| Display | WhisPlayBoard (GPIO/SPI) | n/a — in-process | CPU only | n/a |
+| LLM tokenizer | qwen3_tokenizer_uid.py | 12300 | internal | (child of piAi-llm) |
 
 > Total VRAM: ~7.1 GB / 8 GB. No room for vision models — use cloud provider.
 > Port 12300 is the LLM's internal tokenizer. The orchestrator only ever talks to port 8000.
+> **No display sidecar** — display is driven directly via WhisPlayBoard GPIO/SPI in-process.
 
 ---
 
 ## Project Structure
 
 ```
-assistant/
+PiAi-Assistant/
 ├── CLAUDE.md                ← this file
 ├── config.yaml              ← structural config (ports, thresholds, personality, tools)
 ├── .env                     ← secrets only (gitignored)
 ├── .env.template            ← template for .env
-├── requirements.txt
-├── start.sh                 ← dev launcher (starts display sidecar + orchestrator)
+├── requirements.txt         ← orchestrator Python deps (installed into piAi conda env)
+├── start.sh                 ← manual launcher (uses piAi conda env)
 ├── main.py                  ← entry point
-├── systemd/                 ← production unit files (5 services)
+├── services/                ← service scripts owned by this repo
+│   ├── llm/serve.sh         ← starts Qwen3-4B (activates qwen3 conda env)
+│   ├── asr/serve.sh         ← starts Whisper ASR server
+│   ├── tts/serve.sh         ← starts Kokoro TTS (activates kokoro conda env)
+│   └── display/WhisPlay.py  ← Whisplay HAT GPIO/SPI driver (copied from Whisplay repo)
+├── systemd/                 ← production unit files (4 services, all piAi-*.service)
 ├── data/                    ← runtime data (gitignored)
 │   ├── recordings/          ← WAV files from mic
 │   ├── tts/                 ← WAV files from Kokoro
@@ -77,6 +84,61 @@ assistant/
 
 ---
 
+## Pi Directory Layout
+
+The model/binary directories remain outside the repo (too large for git):
+
+| Directory | Contents | Managed by |
+|---|---|---|
+| `~/PiAi-Assistant/` | **This repo** — all code, configs, scripts | git |
+| `~/Qwen3-4B/` | LLM binary (`main_api_axcl_aarch64`), tokenizer, model shards | manual |
+| `~/whisper.axcl/` | Whisper C++ binary + Flask server | manual |
+| `~/whisper-small-axmodel/` | Whisper axmodel files (2.8GB) | manual |
+| `~/kokoro.LM8850/` | Kokoro server + model files (1.1GB) | manual |
+| `~/Whisplay/` | Original Whisplay driver repo (reference only) | manual |
+| `~/miniforge3/envs/piAi/` | Orchestrator Python env | conda |
+| `~/miniforge3/envs/kokoro/` | Kokoro TTS Python env | conda |
+| `~/miniforge3/envs/qwen3/` | Qwen3 tokenizer Python env | conda |
+| `~/PiAi-Backup/` | Backup of original service code before consolidation | manual |
+
+---
+
+## Conda Environments
+
+Three separate conda environments are required due to conflicting dependencies:
+
+| Env | Used by | Key packages |
+|---|---|---|
+| `piAi` | Orchestrator (`main.py`) | chromadb, sentence-transformers, sounddevice, webrtcvad, requests, PyYAML |
+| `kokoro` | Kokoro TTS server | torch 2.10, onnxruntime, kokoro 0.9.4, spacy, soundfile |
+| `qwen3` | Qwen3 tokenizer | minimal — tokenizer server only |
+
+The `services/*/serve.sh` scripts activate the correct env before starting each service.
+
+---
+
+## Systemd Services
+
+Four unit files in `systemd/`. All use `User=andrew`, paths under `/home/andrew/`.
+
+| Service | Script | Key timing |
+|---|---|---|
+| `piAi-llm` | `services/llm/serve.sh` | `TimeoutStartSec=300` (LLM init ~2 min) |
+| `piAi-asr` | `services/asr/serve.sh` | `TimeoutStartSec=60` |
+| `piAi-tts` | `services/tts/serve.sh` | `TimeoutStartSec=60` |
+| `piAi-orchestrator` | `main.py` via piAi conda env | `After=` all three above; waits 180s internally |
+
+**To install/update services on Pi:**
+```bash
+sudo cp ~/PiAi-Assistant/systemd/piAi-*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable piAi-llm piAi-asr piAi-tts piAi-orchestrator
+sudo systemctl restart piAi-llm piAi-asr piAi-tts
+sudo systemctl restart piAi-orchestrator
+```
+
+---
+
 ## Key Configuration (`config.yaml`)
 
 All structural config lives here. Secrets (API keys) live only in `.env`.
@@ -86,18 +148,17 @@ services:
   llm:    host: http://localhost:8000, temperature: 0.7, enable_thinking: false, poll_interval_ms: 500, max_tool_rounds: 5
   asr:    host: http://localhost:8801, language: en, timeout_s: 120
   tts:    host: http://localhost:8803, voice: af_heart, speed: 1.0, sample_rate: 24000
-  display: host: 127.0.0.1, port: 12345
+  display: host/port unused — display driven via WhisPlayBoard GPIO directly
   vision: provider: placeholder   # placeholder | gemini | openai | anthropic
 
 n8n:
   enabled: false   # set true to enable n8n workflow tools
   url: http://localhost:5678
-  webhook_base: http://localhost:5678/webhook
-  token: ""        # or set N8N_TOKEN in .env
 
 audio:
   sample_rate: 16000, channels: 1, vad_aggressiveness: 2
   silence_timeout_s: 2.0, max_record_s: 30
+  device_name: null   # auto-detects WM8960 (card 2 on this Pi)
 
 memory:
   enabled: true, top_k: 3, score_threshold: 0.65
@@ -113,8 +174,6 @@ display:
   idle: 😴 #000055 | listen: 😐 #00ff00 | think: 🤔 #ff6800 | speak: 🗣️ #0055ff
 ```
 
-All relative paths in `config.yaml` are resolved to absolute paths at load time by `src/config.py`.
-
 ---
 
 ## Architecture Overview
@@ -129,7 +188,7 @@ ORCHESTRATOR (src/orchestrator.py)
        ├── src/services/asr.py       POST /recognize → Whisper :8801
        ├── src/services/llm.py       reset / generate / poll → Qwen3 :8000
        ├── src/services/tts.py       POST /synthesize → Kokoro :8803
-       ├── src/services/display.py   TCP newline-JSON → chatbot-ui.py :12345
+       ├── src/services/display.py   WhisPlayBoard GPIO/SPI (in-process, no TCP)
        ├── src/memory/store.py       ChromaDB cosine search (local SQLite)
        ├── src/memory/embedder.py    sentence-transformers (all-MiniLM-L6-v2, 384-dim)
        └── src/tools/
@@ -141,9 +200,22 @@ ORCHESTRATOR (src/orchestrator.py)
 
 ---
 
+## Display System
+
+**No sidecar process.** `src/services/display.py` imports `WhisPlayBoard` directly from
+`services/display/WhisPlay.py` and drives the hardware in-process.
+
+- `WhisPlayBoard` controls LCD (240×280, SPI), RGB LED (PWM), and button (GPIO interrupt)
+- `DisplayClient.send(payload)` updates backlight, RGB LED, and renders emoji + text to LCD via Pillow
+- `DisplayClient.start_event_listener(cb)` registers a GPIO interrupt callback — no polling thread needed
+- Falls back gracefully to no-op if `RPi.GPIO`/`spidev` are unavailable (dev machine)
+- LCD rendering: Pillow draws emoji (72pt) + status text (22pt) → RGB565 pixel array → `draw_image()`
+
+---
+
 ## LLM Protocol (non-standard — NOT OpenAI API)
 
-The `main_axcl_aarch64` binary uses a bespoke 3-step protocol:
+The `main_api_axcl_aarch64` binary (note: **api** in name, **axmodel_num=28**) uses a bespoke 3-step protocol:
 
 ```
 POST /api/reset    {"system_prompt": "..."}     ← sets KV cache, call once per query
@@ -155,7 +227,7 @@ GET  /api/generate_provider  (every 500ms)       ← poll until done=true
 
 **Critical behaviours in `src/services/llm.py`:**
 - Appends `"\n/no_think"` to system prompt when `enable_thinking: false`
-- Detects `"SetKVCache failed"` in response → NPU context window full → truncates, logs warning, next `reset()` clears it
+- Detects `"SetKVCache failed"` → context window full → truncates, next `reset()` clears it
 - Checks `interrupt_flag` (threading.Event) on every 500ms poll cycle
 
 ---
@@ -192,7 +264,6 @@ The LLM signals a tool call by emitting a `<tool_call>` block:
 **ToolDataCache** (rolling buffer, last 3 results):
 - Prepended to LLM prompt before each generate call
 - Enables follow-up questions without re-invoking tools
-- e.g. "The humidity?" after "What's the weather?" — answers from cache
 
 **n8n memory_hint auto-store:**
 - n8n tools return `{"message": "...", "memory_hint": {"key": "value"}}`
@@ -202,30 +273,12 @@ The LLM signals a tool call by emitting a `<tool_call>` block:
 
 ## Audio Hardware Details
 
-- **Sound card:** WM8960 on Whisplay HAT — auto-detected via `/proc/asound/cards` ("wm8960soundcard")
-- **Device string:** `plughw:N,0` (not `hw:N,0`) — the `plug` layer enables ALSA rate conversion
+- **Sound card:** WM8960 on Whisplay HAT — card index **2** on this Pi (0=vc4hdmi0, 1=vc4hdmi1, 2=wm8960soundcard)
+- **Auto-detected** via `/proc/asound/cards` — `device_name: null` in config works correctly
+- **Device string:** `plughw:2,0` (not `hw:2,0`) — the `plug` layer enables ALSA rate conversion
 - **Frame constraint:** webrtcvad requires exactly 30ms frames: 480 samples × 2 bytes = 960 bytes at 16kHz
 - **Playback:** `aplay -D default` subprocess — `player.stop()` terminates subprocess immediately
-- **Volume:** Set at startup via `amixer -c N set Speaker 114`
-
----
-
-## Display Sidecar Protocol
-
-`chatbot-ui.py` (from whisplay-ai-chatbot-llm8850 reference repo) runs as a separate process. It owns GPIO, SPI, and LCD. We communicate via **TCP port 12345, newline-delimited JSON**.
-
-**We send:**
-```json
-{"status": "thinking", "emoji": "🤔", "RGB": "#ff6800", "text": "Thinking...", "brightness": 80}
-```
-
-**We receive:**
-```json
-{"event": "button_pressed"}
-{"event": "button_released"}
-```
-
-`DisplayClient.send()` is fire-and-forget (no ACK). Button callback fires in a separate thread to avoid blocking the recv loop. Connects with retry (15 × 3s).
+- **Volume:** Set at startup via `amixer -c 2 set Speaker 114`
 
 ---
 
@@ -282,27 +335,16 @@ Default: `PlaceholderVisionProvider` (returns canned message — no cloud calls)
 
 ---
 
-## Systemd Services
-
-Five unit files in `systemd/`. Default paths assume `User=pi`, `WorkingDirectory=/home/pi/PiAi/...`. Edit paths before deploying.
-
-| Service | Manages | Key timing |
-|---|---|---|
-| `assistant-llm` | Qwen3 tokenizer (12300) + inference binary (8000) | `TimeoutStartSec=240` (LLM init ~133s) |
-| `assistant-asr` | Whisper server (8801) | `TimeoutStartSec=60` |
-| `assistant-tts` | Kokoro server (8803) | `TimeoutStartSec=60` |
-| `assistant-display` | chatbot-ui.py sidecar (12345) | `Restart=always` |
-| `assistant-orchestrator` | main.py | `After=` all four above; `TimeoutStartSec=300`; waits 180s internally for services |
-
----
-
 ## Key Implementation Notes
 
 ### Things that will break if you change them
 - **webrtcvad frame size** must be exactly 480 samples (30ms @ 16kHz). Changing `sample_rate` or frame duration will cause VAD errors.
+- **LLM binary is `main_api_axcl_aarch64`** (not `main_axcl_aarch64`). The `api` variant uses port 8000.
+- **axmodel_num is 28** (not 36). Using 36 will cause the LLM to fail loading.
 - **LLM port 8000** is the inference binary. Port 12300 is the tokenizer (internal). Never call 12300 from orchestrator code.
 - **Tool calls parsed before think tag stripping** — do not reorder this in orchestrator.py.
 - **`plughw:N,0` not `hw:N,0`** for audio capture — `hw:` will fail on WM8960 due to rate mismatch.
+- **WM8960 is card index 2** on this Pi (not 1) — recorder auto-detects, but be aware if hardcoding.
 
 ### Common gotchas
 - **SetKVCache failed** — normal after long conversations. LLM context window (p128) is full. Detected in `llm.generate()`, response truncated, next `reset()` clears it.
@@ -310,7 +352,8 @@ Five unit files in `systemd/`. Default paths assume `User=pi`, `WorkingDirectory
 - **picamera2** cannot be reused across calls — create a new instance per capture, always call `stop()` + `close()` in a `finally` block.
 - **Very short TTS fragments** (< 2 words) are skipped — Kokoro errors on them.
 - **sentence-transformers** downloads ~90MB model on first run. Set `TRANSFORMERS_OFFLINE=1` in `.env` for air-gapped Pi.
-- **ChromaDB SQLite** requires SQLite ≥ 3.35. On older Pi OS: `pip install pysqlite3-binary` and monkey-patch.
+- **ChromaDB SQLite** requires SQLite ≥ 3.35. If older: `pip install pysqlite3-binary` and monkey-patch in `store.py`.
+- **WhisPlayBoard LCD rendering** uses DejaVuSans font from `/usr/share/fonts/truetype/dejavu/`. Falls back to default PIL font if not found.
 
 ### Logging
 - Format: `%(asctime)s  %(levelname)-8s  %(name)-30s  %(message)s`
@@ -322,47 +365,38 @@ Five unit files in `systemd/`. Default paths assume `User=pi`, `WorkingDirectory
 
 ## Development Workflow
 
-### Running locally (macOS dev machine)
-Most of the Python code can be edited and tested on macOS. Hardware-specific code (picamera2, sounddevice with WM8960, webrtcvad) is import-guarded or will fail gracefully.
-
-```bash
-cd /Users/andrew.graydon/Documents/Code/Python/PiAi/assistant
-pip install -r requirements.txt
-python3 main.py --log-level DEBUG   # Will fail waiting for NPU services (expected)
-```
-
 ### Deploying to Pi
 ```bash
-# On the Pi — pull latest from GitHub
-cd ~/PiAi/assistant
-git pull origin main
+# From Mac — push to GitHub then pull on Pi
+git push origin main
+ssh andrew@10.10.0.129 "cd ~/PiAi-Assistant && git pull origin main"
 
-# Restart orchestrator only (if only Python code changed)
-sudo systemctl restart assistant-orchestrator
+# Or rsync directly (faster for iteration)
+rsync -av --exclude='.git' --exclude='data/' --exclude='__pycache__' \
+  /Users/andrew.graydon/Documents/Code/Python/PiAi/assistant/ \
+  andrew@10.10.0.129:~/PiAi-Assistant/
 
-# Restart everything (if config or services changed)
-sudo systemctl restart assistant-llm assistant-asr assistant-tts assistant-display assistant-orchestrator
+# Restart orchestrator only (Python code changes)
+ssh andrew@10.10.0.129 "sudo systemctl restart piAi-orchestrator"
+
+# Restart all services (config or service script changes)
+ssh andrew@10.10.0.129 "sudo systemctl restart piAi-llm piAi-asr piAi-tts piAi-orchestrator"
 ```
 
 ### Viewing logs on Pi
 ```bash
-tail -f ~/PiAi/assistant/data/logs/assistant.log
-journalctl -u assistant-orchestrator -f
+ssh andrew@10.10.0.129 "tail -f ~/PiAi-Assistant/data/logs/assistant.log"
+ssh andrew@10.10.0.129 "journalctl -u piAi-orchestrator -f"
+ssh andrew@10.10.0.129 "journalctl -u piAi-llm -f"
 ```
 
----
-
-## Reference Repos (read-only)
-
-These repos provided the implementation patterns. Do not modify them.
-
-| Repo | Path | What it provides |
-|---|---|---|
-| whisplay-ai-chatbot-llm8850 | `../whisplay-ai-chatbot-llm8850/` | chatbot-ui.py display sidecar, LLM reset/generate/poll protocol reference |
-| whisper.axcl | `../whisper.axcl/` | Whisper ASR server (port 8801) |
-| kokoro.LM8850 | `../kokoro.LM8850/` | Kokoro TTS server (port 8803), /synthesize and /health endpoints |
-| Qwen3-4B | `../Qwen3-4B/` | LLM inference binary + tokenizer server + startup args |
-| CAAL | `../CAAL/` | n8n tool pattern, ToolDataCache, memory_hint design |
+### Setting up GitHub SSH on Pi (for git pull)
+The Pi currently has no GitHub SSH key. Use rsync or set one up:
+```bash
+ssh andrew@10.10.0.129 "ssh-keygen -t ed25519 -C 'andrew@aiserver' -f ~/.ssh/id_ed25519 -N ''"
+ssh andrew@10.10.0.129 "cat ~/.ssh/id_ed25519.pub"
+# Add the output key to GitHub → Settings → SSH keys
+```
 
 ---
 
@@ -373,6 +407,7 @@ These repos provided the implementation patterns. Do not modify them.
 | New vision provider | Implement `VisionProvider` ABC in `src/services/vision_{name}.py`, add to `create_vision_client()` factory, set `provider:` in config.yaml |
 | New built-in tool | Add class to `src/tools/`, register in `Orchestrator._register_tools()`, add tool description to `assistant.system_prompt` in config.yaml |
 | New n8n tool | Create n8n workflow with webhook trigger, add description in node Notes, activate — no code changes needed |
-| Wake word | Add a always-on VAD/keyword loop in `src/audio/` and trigger `_on_button_pressed()` programmatically |
+| Wake word | Add always-on VAD/keyword loop in `src/audio/` and trigger `_on_button_pressed()` programmatically |
 | Home Assistant | Replace `HomeTool` stub with HA REST API calls, or create an n8n workflow that talks to HA |
 | Streaming TTS | Split `_speak_response()` to begin synthesizing first sentence while LLM is still generating |
+| Custom LCD image | Modify `_render_lcd()` in `src/services/display.py` — it has full Pillow image access |

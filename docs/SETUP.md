@@ -121,47 +121,45 @@ pip install axcl
 
 ## 4. Clone Reference Repositories
 
-All AI service repositories live alongside the assistant. Create a base directory:
-
-```bash
-mkdir -p ~/PiAi
-cd ~/PiAi
-```
-
-### Whisplay display sidecar
-
-```bash
-git clone https://github.com/m5stack/whisplay-ai-chatbot-llm8850.git
-```
+All AI service repositories are cloned directly to `~/`. There is no `~/PiAi/` parent directory — each repo lives at the top level of your home directory.
 
 ### Whisper ASR
 
 ```bash
-git clone https://github.com/PiSugar/whisper.axcl.git
+git clone https://github.com/PiSugar/whisper.axcl.git ~/whisper.axcl
 ```
 
 ### Kokoro TTS
 
 ```bash
-git clone https://github.com/m5stack/kokoro.LM8850.git
+git clone https://github.com/m5stack/kokoro.LM8850.git ~/kokoro.LM8850
+```
+
+### Whisplay HAT driver (reference)
+
+```bash
+git clone https://github.com/m5stack/Whisplay.git ~/Whisplay
 ```
 
 ### PiAi Assistant (this repo)
 
 ```bash
-git clone https://github.com/AndrewGraydon/PiAi-Assistant.git assistant
+git clone https://github.com/AndrewGraydon/PiAi-Assistant.git ~/PiAi-Assistant
 ```
 
 Your directory structure should now look like:
 
 ```
-~/PiAi/
-├── assistant/                        ← this repo
-├── whisplay-ai-chatbot-llm8850/
-├── whisper.axcl/
-├── kokoro.LM8850/
-└── Qwen3-4B/                         ← next step
+~/
+├── PiAi-Assistant/                   ← this repo (already exists on the Pi)
+├── Qwen3-4B/                         ← next step (LLM binary + model shards)
+├── whisper.axcl/                     ← Whisper C++ binary + Flask server
+├── whisper-small-axmodel/            ← Whisper axmodel files (separate directory)
+├── kokoro.LM8850/                    ← Kokoro TTS server + model files
+└── Whisplay/                         ← Whisplay HAT driver (reference only)
 ```
+
+> `~/whisper-small-axmodel/` is a separate directory from `~/whisper.axcl/`. The axmodel files are not inside the whisper.axcl repo.
 
 ---
 
@@ -172,21 +170,21 @@ Your directory structure should now look like:
 The Qwen3-4B w8a16 int8 quantised axmodel is not in a public git repo — download it from M5Stack's model releases or the AX-Samples repository.
 
 ```bash
-mkdir -p ~/PiAi/Qwen3-4B
-cd ~/PiAi/Qwen3-4B
+mkdir -p ~/Qwen3-4B
+cd ~/Qwen3-4B
 
 # Download the model archive (check M5Stack documentation for current URL)
 # The archive should contain:
-#   qwen3-4b-ax650/           ← directory with 36 axmodel shards + post model + embed weights
-#   qwen3_tokenizer_uid.py    ← tokenizer server
-#   main_axcl_aarch64         ← inference binary
+#   qwen3-4b-ax650/               ← directory with 28 axmodel shards + post model + embed weights
+#   qwen3_tokenizer_uid.py        ← tokenizer server
+#   main_api_axcl_aarch64         ← inference binary (note: "api" in the name)
 ```
 
 Verify the expected files are present:
 
 ```bash
-ls ~/PiAi/Qwen3-4B/qwen3-4b-ax650/
-# Expected: qwen3_p128_l0_together.axmodel ... qwen3_p128_l35_together.axmodel
+ls ~/Qwen3-4B/qwen3-4b-ax650/
+# Expected: qwen3_p128_l0_together.axmodel ... qwen3_p128_l27_together.axmodel  (28 shards)
 #           qwen3_post.axmodel
 #           model.embed_tokens.weight.bfloat16.bin
 ```
@@ -194,21 +192,24 @@ ls ~/PiAi/Qwen3-4B/qwen3-4b-ax650/
 Make the inference binary executable:
 
 ```bash
-chmod +x ~/PiAi/Qwen3-4B/main_axcl_aarch64
+chmod +x ~/Qwen3-4B/main_api_axcl_aarch64
 ```
 
 ### Whisper ASR models
 
+The Whisper axmodel files live in a **separate** directory from the `whisper.axcl` repo. On this Pi they are already present in `~/whisper-small-axmodel/`:
+
 ```bash
-cd ~/PiAi/whisper.axcl
-# Follow the README to download Whisper-Small axmodel files
-# Typically: python3 download_models.py  or  wget from a provided URL
+ls ~/whisper-small-axmodel/
+# Expected: whisper_small encoder/decoder axmodel files (~2.8 GB total)
 ```
+
+If you need to download them fresh, follow the README in `~/whisper.axcl/` for the download URL.
 
 ### Kokoro TTS models
 
 ```bash
-cd ~/PiAi/kokoro.LM8850
+cd ~/kokoro.LM8850
 # Follow the README to download Kokoro axmodel and voicepack files
 ```
 
@@ -217,7 +218,7 @@ cd ~/PiAi/kokoro.LM8850
 ## 6. Clone and Configure PiAi Assistant
 
 ```bash
-cd ~/PiAi/assistant
+cd ~/PiAi-Assistant
 ```
 
 ### Create your `.env` file
@@ -297,28 +298,40 @@ sudo apt install -y \
 
 > `python3-picamera2` must be installed via `apt` — it is not available on PyPI and requires system camera libraries.
 
-### Python packages
+### Orchestrator Python packages (conda env: piAi)
+
+The orchestrator runs in a dedicated conda environment called `piAi`. Kokoro and Qwen3 each have their own existing conda envs (`kokoro` and `qwen3` respectively) — do not mix them.
 
 ```bash
-cd ~/PiAi/assistant
-pip install -r requirements.txt
+# Activate conda (if not already in your shell profile)
+source ~/miniforge3/etc/profile.d/conda.sh
+
+# Create the orchestrator environment
+conda create -n piAi python=3.11 -y
+
+# Install orchestrator dependencies into the piAi env
+~/miniforge3/envs/piAi/bin/pip install -r ~/PiAi-Assistant/requirements.txt
 ```
 
 > **Note:** `sentence-transformers` and `chromadb` pull in several large dependencies (PyTorch CPU, ONNX Runtime). This may take 10–20 minutes on a Pi 5. Run it once and it's cached.
 
 ### Whisper ASR dependencies
 
+Whisper ASR has its own environment managed by the `whisper.axcl` repo. Follow its README. Typically:
+
 ```bash
-cd ~/PiAi/whisper.axcl
+cd ~/whisper.axcl
 pip install -r requirements.txt    # if a requirements.txt exists, otherwise:
 pip install flask numpy soundfile
 ```
 
 ### Kokoro TTS dependencies
 
+Kokoro uses the existing `kokoro` conda env. Follow the repo's own instructions if setting up from scratch:
+
 ```bash
-cd ~/PiAi/kokoro.LM8850
-pip install -r requirements.txt    # follow the repo's own instructions
+cd ~/kokoro.LM8850
+# Follow the repo README — dependencies install into the kokoro conda env
 ```
 
 ---
@@ -350,13 +363,14 @@ TRANSFORMERS_OFFLINE=1
 cat /proc/asound/cards
 ```
 
-Expected output (card index may vary):
+Expected output on this Pi (card index 2 for WM8960):
 ```
  0 [vc4hdmi0       ]: vc4-hdmi - vc4-hdmi-0
- 1 [wm8960soundcard]: wm8960-soundcard - wm8960-soundcard
+ 1 [vc4hdmi1       ]: vc4-hdmi - vc4-hdmi-1
+ 2 [wm8960soundcard]: wm8960-soundcard - wm8960-soundcard
 ```
 
-Note the index next to `wm8960soundcard` (typically `1`).
+Note the index next to `wm8960soundcard` — on this Pi it is **2**.
 
 ### Set speaker volume
 
@@ -372,7 +386,7 @@ amixer -c N set Speaker 114
 
 ```bash
 # Record 5 seconds, then play back
-arecord -D plughw:1,0 -f S16_LE -r 16000 -d 5 /tmp/test.wav
+arecord -D plughw:2,0 -f S16_LE -r 16000 -d 5 /tmp/test.wav
 aplay -D default /tmp/test.wav
 ```
 
@@ -397,17 +411,17 @@ Start each service in a separate terminal (or using `tmux`/`screen`). This lets 
 ### Terminal 1 — LLM (Qwen3-4B)
 
 ```bash
-cd ~/PiAi/Qwen3-4B
+cd ~/Qwen3-4B
 
 # Start the tokenizer server
 python3 qwen3_tokenizer_uid.py --port 12300 &
 
 # Wait 8 seconds, then start the inference binary
 sleep 8
-./main_axcl_aarch64 \
+./main_api_axcl_aarch64 \
   --url_tokenizer_model http://127.0.0.1:12300 \
   --template_filename_axmodel "qwen3-4b-ax650/qwen3_p128_l%d_together.axmodel" \
-  --axmodel_num 36 \
+  --axmodel_num 28 \
   --filename_post_axmodel qwen3-4b-ax650/qwen3_post.axmodel \
   --filename_tokens_embed qwen3-4b-ax650/model.embed_tokens.weight.bfloat16.bin \
   --tokens_embed_num 151936 \
@@ -422,7 +436,7 @@ sleep 8
 ### Terminal 2 — ASR (Whisper)
 
 ```bash
-cd ~/PiAi/whisper.axcl
+cd ~/whisper.axcl
 python3 server/main.py
 # Listens on port 8801
 ```
@@ -430,25 +444,15 @@ python3 server/main.py
 ### Terminal 3 — TTS (Kokoro)
 
 ```bash
-cd ~/PiAi/kokoro.LM8850
+cd ~/kokoro.LM8850
 python3 kokoro_svr.py --port 8803
 # Listens on port 8803
 ```
 
-### Terminal 4 — Display sidecar
+### Terminal 4 — Assistant orchestrator
 
 ```bash
-cd ~/PiAi/whisplay-ai-chatbot-llm8850/python
-python3 chatbot-ui.py
-# Opens TCP socket on port 12345
-# Controls LCD, LED, and GPIO button
-```
-
-### Terminal 5 — Assistant orchestrator
-
-```bash
-cd ~/PiAi/assistant
-./start.sh
+cd ~/PiAi-Assistant && ./start.sh
 ```
 
 The orchestrator will log:
@@ -468,85 +472,76 @@ Once you've verified everything works manually, configure systemd to start all s
 
 ### Edit unit file paths
 
-All unit files default to `/home/pi/PiAi/...`. If your username or install path differs, update each file:
+All unit files in `systemd/` use `/home/andrew` and `User=andrew`. If your username differs, update each file:
 
 ```bash
-cd ~/PiAi/assistant/systemd
+cd ~/PiAi-Assistant/systemd
 
-# Edit each file to replace /home/pi with your home directory
-# e.g. if your username is 'andrew':
-sed -i 's|/home/pi|/home/andrew|g' *.service
-sed -i 's|User=pi|User=andrew|g' *.service
-sed -i 's|Group=pi|Group=andrew|g' *.service
+# Replace 'andrew' with your username throughout all unit files
+sed -i 's|/home/andrew|/home/yourusername|g' *.service
+sed -i 's|User=andrew|User=yourusername|g' *.service
+sed -i 's|Group=andrew|Group=yourusername|g' *.service
 ```
 
 ### Install unit files
 
 ```bash
-sudo cp ~/PiAi/assistant/systemd/*.service /etc/systemd/system/
+sudo cp ~/PiAi-Assistant/systemd/piAi-*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
 
 ### Enable services (start on boot)
 
 ```bash
-sudo systemctl enable \
-    assistant-llm \
-    assistant-asr \
-    assistant-tts \
-    assistant-display \
-    assistant-orchestrator
+sudo systemctl enable piAi-llm piAi-asr piAi-tts piAi-orchestrator
 ```
 
 ### Start services now
 
 ```bash
 # Start the AI services first (LLM takes ~133s to be ready)
-sudo systemctl start assistant-llm assistant-asr assistant-tts assistant-display
+sudo systemctl start piAi-llm piAi-asr piAi-tts
 
 # Wait ~2 minutes for LLM to initialise, then start orchestrator
 # (or just start it — it polls internally for up to 180s)
-sudo systemctl start assistant-orchestrator
+sudo systemctl start piAi-orchestrator
 ```
 
 ### Verify all services are running
 
 ```bash
-sudo systemctl status assistant-llm
-sudo systemctl status assistant-asr
-sudo systemctl status assistant-tts
-sudo systemctl status assistant-display
-sudo systemctl status assistant-orchestrator
+sudo systemctl status piAi-llm
+sudo systemctl status piAi-asr
+sudo systemctl status piAi-tts
+sudo systemctl status piAi-orchestrator
 ```
 
 ### View live logs
 
 ```bash
 # Orchestrator logs (most useful)
-journalctl -u assistant-orchestrator -f
+journalctl -u piAi-orchestrator -f
 
 # LLM logs (shows token generation)
-journalctl -u assistant-llm -f
+journalctl -u piAi-llm -f
 
 # All PiAi services together
-journalctl -u assistant-llm -u assistant-asr -u assistant-tts \
-           -u assistant-display -u assistant-orchestrator -f
+journalctl -u piAi-llm -u piAi-asr -u piAi-tts -u piAi-orchestrator -f
 
 # Application log file
-tail -f ~/PiAi/assistant/data/logs/assistant.log
+tail -f ~/PiAi-Assistant/data/logs/assistant.log
 ```
 
 ### Restart individual services
 
 ```bash
-sudo systemctl restart assistant-orchestrator
+sudo systemctl restart piAi-orchestrator
 ```
 
 ### Stop everything
 
 ```bash
-sudo systemctl stop assistant-orchestrator assistant-display \
-                    assistant-tts assistant-asr assistant-llm
+sudo systemctl stop piAi-orchestrator piAi-tts piAi-asr piAi-llm
 ```
 
 ---
@@ -713,13 +708,13 @@ curl -X POST http://localhost:8801/recognize       # ASR — expect 400
 curl http://localhost:8803/health                  # TTS — expect {"status":"ok"}
 
 # Check service logs
-journalctl -u assistant-llm -n 50
+journalctl -u piAi-llm -n 50
 ```
 
 Common causes:
-- **LLM not ready**: It takes ~133s. The orchestrator waits up to 180s. If it still times out, increase `TimeoutStartSec` in `assistant-orchestrator.service`.
+- **LLM not ready**: It takes ~133s. The orchestrator waits up to 180s. If it still times out, increase `TimeoutStartSec` in `piAi-orchestrator.service`.
 - **Wrong paths in service files**: Double-check WorkingDirectory and ExecStart paths.
-- **Missing model files**: Verify the axmodel files exist in `~/PiAi/Qwen3-4B/qwen3-4b-ax650/`.
+- **Missing model files**: Verify the axmodel files exist in `~/Qwen3-4B/qwen3-4b-ax650/`.
 
 ---
 
@@ -730,7 +725,7 @@ Common causes:
 arecord -l
 
 # Test capture directly
-arecord -D plughw:1,0 -f S16_LE -r 16000 -d 3 /tmp/test.wav && aplay /tmp/test.wav
+arecord -D plughw:2,0 -f S16_LE -r 16000 -d 3 /tmp/test.wav && aplay /tmp/test.wav
 ```
 
 - **Wrong card index**: Check `cat /proc/asound/cards`. If WM8960 is card 0, set `device_name: plughw:0,0` in `config.yaml`.
@@ -741,7 +736,7 @@ arecord -D plughw:1,0 -f S16_LE -r 16000 -d 3 /tmp/test.wav && aplay /tmp/test.w
 
 ### Transcription is empty or garbled
 
-- **Microphone too quiet**: Increase capture volume: `amixer -c 1 set Capture 80%`
+- **Microphone too quiet**: Increase capture volume: `amixer -c 2 set Capture 80%`
 - **Wrong language**: Set `services.asr.language` in `config.yaml`
 - **VAD too aggressive**: Lower `audio.vad_aggressiveness` to `1` or `0`
 - **Recording stops too fast**: Increase `audio.silence_timeout_s` to `3.0`
@@ -759,15 +754,16 @@ arecord -D plughw:1,0 -f S16_LE -r 16000 -d 3 /tmp/test.wav && aplay /tmp/test.w
 ### Button press not detected
 
 ```bash
-# Check if the display sidecar is running
-journalctl -u assistant-display -n 20
+# Check orchestrator logs for GPIO/display errors
+journalctl -u piAi-orchestrator -n 30
 
-# Check if port 12345 is listening
-ss -tlnp | grep 12345
+# Verify the display driver is loaded in-process (no separate sidecar)
+# The orchestrator imports WhisPlayBoard directly — no port 12345 needed
 ```
 
-- **Display sidecar not running**: Without it, there are no button events. The orchestrator will log a connection error.
-- **GPIO permission**: The `chatbot-ui.py` process needs GPIO access. Ensure the user is in the `gpio` group: `sudo usermod -aG gpio pi`
+- **GPIO permission**: The orchestrator needs GPIO access. Ensure the user is in the `gpio` group: `sudo usermod -aG gpio andrew`
+- **Display driver not found**: Verify `services/display/WhisPlay.py` exists in `~/PiAi-Assistant/`. The orchestrator imports it directly at startup.
+- **RPi.GPIO not installed**: `pip install RPi.GPIO` inside the `piAi` conda env.
 
 ---
 
@@ -784,10 +780,10 @@ ss -tlnp | grep 12345
 
 ```bash
 # Check the database directory exists and is writable
-ls -la ~/PiAi/assistant/data/chroma/
+ls -la ~/PiAi-Assistant/data/chroma/
 
 # Clear the memory store if it's corrupted (this erases all stored memories)
-rm -rf ~/PiAi/assistant/data/chroma/
+rm -rf ~/PiAi-Assistant/data/chroma/
 ```
 
 - **sqlite3 version too old**: ChromaDB requires SQLite ≥ 3.35. Check: `python3 -c "import sqlite3; print(sqlite3.sqlite_version)"`
@@ -821,13 +817,13 @@ Healthy readings under load:
 
 ```bash
 # Live log tail
-tail -f ~/PiAi/assistant/data/logs/assistant.log
+tail -f ~/PiAi-Assistant/data/logs/assistant.log
 
 # Last 100 lines
-tail -100 ~/PiAi/assistant/data/logs/assistant.log
+tail -100 ~/PiAi-Assistant/data/logs/assistant.log
 
 # Search for errors
-grep -i error ~/PiAi/assistant/data/logs/assistant.log | tail -20
+grep -i error ~/PiAi-Assistant/data/logs/assistant.log | tail -20
 ```
 
 Log levels: `DEBUG` (very verbose), `INFO` (normal operation), `WARNING` (non-fatal issues), `ERROR` (failures).
