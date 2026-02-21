@@ -6,6 +6,11 @@
 # Model files live in: ~/Qwen3-4B/ (not managed by this repo)
 # Tokenizer port: 12300 (internal only)
 # API port: 8000
+#
+# --system_prompt sets the default system context baked into the binary's KV
+# cache at startup. The orchestrator overrides this per-conversation via
+# POST /api/reset with a RAG-augmented prompt.
+# /no_think disables Qwen3's chain-of-thought (thinking) mode.
 
 set -e
 
@@ -40,6 +45,8 @@ sleep 8
 
 echo "Starting Qwen3-4B inference binary..."
 ./main_api_axcl_aarch64 \
+    --system_prompt "You are Jarvis, a helpful local AI assistant running on a Raspberry Pi. Be concise — your responses are spoken aloud via text-to-speech. Speak naturally, as if having a conversation. Avoid markdown and bullet points.
+/no_think" \
     --template_filename_axmodel "qwen3-4b-ax650/qwen3_p128_l%d_together.axmodel" \
     --axmodel_num 28 \
     --url_tokenizer_model "http://127.0.0.1:$PORT" \
@@ -48,6 +55,7 @@ echo "Starting Qwen3-4B inference binary..."
     --tokens_embed_num 151936 \
     --tokens_embed_size 2560 \
     --use_mmap_load_embed 1 \
+    --live_print 1 \
     --devices 0
 
 # Clean up tokenizer when inference binary exits
