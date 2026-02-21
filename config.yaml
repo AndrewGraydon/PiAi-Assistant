@@ -93,6 +93,12 @@ display:
   think_color: "#ff6800"
   speak_color: "#0055ff"
 
+battery:
+  enabled: true
+  host: 127.0.0.1           # pisugar-server TCP address
+  port: 8423                # pisugar-server TCP port
+  poll_interval_s: 30       # How often to read battery level
+
 paths:
   recordings_dir: ./data/recordings
   tts_dir: ./data/tts

@@ -9,10 +9,11 @@ On non-Pi environments (dev machines without RPi.GPIO / spidev), the driver
 import fails gracefully and a stub is used so the rest of the code still runs.
 
 Public interface (same as before so orchestrator.py is unchanged):
-    display.connect_with_retry()       — initialises hardware
-    display.send(payload: dict)        — updates LCD/LED based on status/emoji/RGB/text
-    display.start_event_listener(cb)   — registers button press callback (GPIO interrupt)
-    display.disconnect()               — cleanup GPIO
+    display.connect_with_retry()          — initialises hardware
+    display.send(payload: dict)           — updates LCD/LED based on status/emoji/RGB/text
+    display.update_battery_level(level)   — update battery percentage shown in header (0-100)
+    display.start_event_listener(cb)      — registers button press callback (GPIO interrupt)
+    display.disconnect()                  — cleanup GPIO
 
 Payload keys understood by send():
     status      — one of: idle | recording | transcribing | thinking | speaking
@@ -63,9 +64,136 @@ def _hex_to_rgb(hex_colour: str) -> tuple[int, int, int]:
     return r, g, b
 
 
-def _render_lcd(board: "WhisPlayBoard", emoji: str, text: str) -> None:  # type: ignore
+def _battery_colour(level: int) -> tuple[int, int, int]:
+    """
+    Return an RGB colour for the battery fill based on charge level.
+    Green (#55FF00) above 40%, yellow above 20%, red below 20%.
+    """
+    if level > 40:
+        return (0x55, 0xFF, 0x00)   # Green
+    elif level > 20:
+        return (0xFF, 0xAA, 0x00)   # Amber
+    else:
+        return (0xFF, 0x22, 0x22)   # Red
+
+
+def _render_battery(draw: "ImageDraw.ImageDraw", battery_level: int, image_width: int) -> None:  # type: ignore
+    """
+    Draw a battery icon in the top-right corner of the LCD image.
+    Replicates render_battery() from the reference chatbot-ui.py.
+
+    Icon is 26×15 px with a 3px corner radius.  A small "head" nub sits to
+    the right.  The interior fill colour reflects charge level.
+    """
+    battery_width = 26
+    battery_height = 15
+    battery_margin_right = 20
+    corner_radius = 3
+    line_width = 2
+
+    battery_x = image_width - battery_width - battery_margin_right
+    # Align vertically with the top of the header (same as chatbot-ui.py: status_font_size // 2)
+    battery_y = 8
+
+    outline_color: tuple[int, int, int] = (255, 255, 255)
+    fill_color = _battery_colour(battery_level)
+
+    # Rounded-corner outline (4 arcs + 4 straight lines)
+    draw.arc(
+        (battery_x, battery_y,
+         battery_x + 2 * corner_radius, battery_y + 2 * corner_radius),
+        180, 270, fill=outline_color, width=line_width,
+    )
+    draw.arc(
+        (battery_x + battery_width - 2 * corner_radius, battery_y,
+         battery_x + battery_width, battery_y + 2 * corner_radius),
+        270, 0, fill=outline_color, width=line_width,
+    )
+    draw.arc(
+        (battery_x, battery_y + battery_height - 2 * corner_radius,
+         battery_x + 2 * corner_radius, battery_y + battery_height),
+        90, 180, fill=outline_color, width=line_width,
+    )
+    draw.arc(
+        (battery_x + battery_width - 2 * corner_radius,
+         battery_y + battery_height - 2 * corner_radius,
+         battery_x + battery_width, battery_y + battery_height),
+        0, 90, fill=outline_color, width=line_width,
+    )
+
+    draw.line(
+        [(battery_x + corner_radius, battery_y),
+         (battery_x + battery_width - corner_radius, battery_y)],
+        fill=outline_color, width=line_width,
+    )
+    draw.line(
+        [(battery_x + corner_radius, battery_y + battery_height),
+         (battery_x + battery_width - corner_radius, battery_y + battery_height)],
+        fill=outline_color, width=line_width,
+    )
+    draw.line(
+        [(battery_x, battery_y + corner_radius),
+         (battery_x, battery_y + battery_height - corner_radius)],
+        fill=outline_color, width=line_width,
+    )
+    draw.line(
+        [(battery_x + battery_width, battery_y + corner_radius),
+         (battery_x + battery_width, battery_y + battery_height - corner_radius)],
+        fill=outline_color, width=line_width,
+    )
+
+    # Fill interior with charge colour
+    draw.rectangle(
+        [battery_x + line_width // 2, battery_y + line_width // 2,
+         battery_x + battery_width - line_width // 2,
+         battery_y + battery_height - line_width // 2],
+        fill=fill_color,
+    )
+
+    # Battery "head" nub on the right
+    head_width = 2
+    head_height = 5
+    head_x = battery_x + battery_width
+    head_y = battery_y + (battery_height - head_height) // 2
+    draw.rectangle(
+        [head_x, head_y, head_x + head_width, head_y + head_height],
+        fill=(255, 255, 255),
+    )
+
+    # Battery percentage text (just the number) centred inside icon
+    try:
+        from PIL import ImageFont  # type: ignore
+        try:
+            batt_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10
+            )
+        except Exception:
+            batt_font = ImageFont.load_default()
+    except ImportError:
+        return
+
+    battery_text = str(battery_level)
+    text_bbox = batt_font.getbbox(battery_text)
+    text_w = text_bbox[2] - text_bbox[0]
+    text_h = text_bbox[3] - text_bbox[1]
+    text_x = battery_x + (battery_width - text_w) // 2
+    text_y = battery_y + (battery_height - text_h) // 2
+
+    # Text colour: dark on bright fill, light on dark fill
+    lum = (fill_color[0] * 299 + fill_color[1] * 587 + fill_color[2] * 114) // 1000
+    text_fill: tuple[int, int, int] = (0, 0, 0) if lum > 128 else (255, 255, 255)
+    draw.text((text_x, text_y), battery_text, font=batt_font, fill=text_fill)
+
+
+def _render_lcd(
+    board: "WhisPlayBoard",  # type: ignore
+    emoji: str,
+    text: str,
+    battery_level: Optional[int] = None,
+) -> None:
     """
     Draw emoji + status text onto the 240×280 LCD using Pillow.
+    If battery_level is not None, a battery icon is drawn in the top-right.
     Falls back to fill_screen if Pillow is unavailable.
     """
     try:
@@ -85,6 +213,10 @@ def _render_lcd(board: "WhisPlayBoard", emoji: str, text: str) -> None:  # type:
             text_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22)
         except Exception:
             text_font = ImageFont.load_default()
+
+        # Draw battery icon in top-right (before emoji so it appears under nothing)
+        if battery_level is not None:
+            _render_battery(draw, battery_level, 240)
 
         # Draw emoji
         bbox = draw.textbbox((0, 0), emoji, font=emoji_font)
@@ -141,6 +273,13 @@ class DisplayClient:
         self._button_callback: Optional[Callable[[], None]] = None
         self._lock = threading.Lock()
         self._connected = False
+
+        # Battery level (None until first reading from BatteryMonitor)
+        self._battery_level: Optional[int] = None
+
+        # Last payload sent via send() — stored so we can re-render when battery updates
+        self._last_emoji: str = ""
+        self._last_text: str = ""
 
     # ------------------------------------------------------------------
     # Connection management
@@ -222,10 +361,36 @@ class DisplayClient:
 
                 emoji = payload.get("emoji", "")
                 text = payload.get("text", "")
-                _render_lcd(self._board, emoji, text)
+
+                # Remember last content so battery updates can re-render
+                self._last_emoji = emoji
+                self._last_text = text
+
+                _render_lcd(self._board, emoji, text, battery_level=self._battery_level)
 
             except Exception as e:
                 log.warning("Display send error: %s", e)
+
+    def update_battery_level(self, level: int) -> None:
+        """
+        Update the battery level shown in the LCD header.
+        Called by BatteryMonitor on each poll cycle.
+        Thread-safe — re-renders the current LCD frame with the new level.
+        """
+        with self._lock:
+            self._battery_level = level
+            if not self._connected or self._board is None:
+                return
+            try:
+                _render_lcd(
+                    self._board,
+                    self._last_emoji,
+                    self._last_text,
+                    battery_level=level,
+                )
+                log.debug("Battery icon updated: %d%%", level)
+            except Exception as e:
+                log.warning("Battery display update error: %s", e)
 
     # ------------------------------------------------------------------
     # Button event listener

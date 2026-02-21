@@ -122,6 +122,14 @@ class DisplayThemeConfig:
 
 
 @dataclass
+class BatteryConfig:
+    enabled: bool
+    host: str           # pisugar-server TCP host (usually 127.0.0.1)
+    port: int           # pisugar-server TCP port (8423)
+    poll_interval_s: float
+
+
+@dataclass
 class PathsConfig:
     recordings_dir: str         # all resolved to absolute paths
     tts_dir: str
@@ -142,6 +150,7 @@ class Config:
     tools: ToolsConfig
     assistant: AssistantConfig
     display_theme: DisplayThemeConfig
+    battery: BatteryConfig
     paths: PathsConfig
 
 
@@ -314,6 +323,15 @@ def load_config(config_path: str = "config.yaml") -> Config:
         speak_color=dt_raw.get("speak_color", "#0055ff"),
     )
 
+    # ---- Battery ----
+    batt_raw = raw.get("battery", {})
+    battery = BatteryConfig(
+        enabled=bool(batt_raw.get("enabled", True)),
+        host=batt_raw.get("host", "127.0.0.1"),
+        port=int(batt_raw.get("port", 8423)),
+        poll_interval_s=float(batt_raw.get("poll_interval_s", 30)),
+    )
+
     # ---- Paths (all resolved to absolute) ----
     paths_raw = raw.get("paths", {})
     paths = PathsConfig(
@@ -335,5 +353,6 @@ def load_config(config_path: str = "config.yaml") -> Config:
         tools=tools,
         assistant=assistant,
         display_theme=display_theme,
+        battery=battery,
         paths=paths,
     )

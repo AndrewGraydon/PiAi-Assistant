@@ -45,6 +45,7 @@ from src.tools.camera import CameraTool
 from src.tools.home import HomeTool
 from src.tools.n8n import N8NClient
 from src.tools.registry import ToolDataCache, ToolRegistry
+from src.utils.battery import BatteryMonitor
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +137,16 @@ class Orchestrator:
             timeout_s=config.n8n.timeout_s,
         )
 
+        # --- Battery monitor ---
+        self.battery_monitor: Optional[BatteryMonitor] = None
+        if config.battery.enabled:
+            self.battery_monitor = BatteryMonitor(
+                callback=self.display.update_battery_level,
+                host=config.battery.host,
+                port=config.battery.port,
+                poll_interval_s=config.battery.poll_interval_s,
+            )
+
         self._register_tools()
 
     # ------------------------------------------------------------------
@@ -218,6 +229,10 @@ class Orchestrator:
         self._transition(State.IDLE)
         self.display.start_event_listener(self._on_button_pressed)
 
+        # Start battery monitor after display is ready (so first update renders)
+        if self.battery_monitor:
+            self.battery_monitor.start()
+
         log.info(
             "%s is ready. Press the button to speak.",
             self.config.assistant.name,
@@ -232,6 +247,8 @@ class Orchestrator:
     def shutdown(self) -> None:
         log.info("Orchestrator shutting down...")
         self._interrupt_flag.set()
+        if self.battery_monitor:
+            self.battery_monitor.stop()
         self.player.stop()
         self.display.disconnect()
 
