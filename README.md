@@ -8,9 +8,9 @@ A voice-first, mostly-offline AI assistant running on a **Raspberry Pi 5** with 
 
 | Component | Details |
 |---|---|
-| Host | Raspberry Pi 5 (8GB RAM), Ubuntu 22.04 / Debian 12 |
+| Host | Raspberry Pi 5 (8GB RAM), hostname `aiserver` |
 | Accelerator | M5Stack LLM8850 (M.2 2242, 8GB VRAM) via dual M.2 HAT |
-| Display / Audio | Whisplay HAT — 240×280 LCD, RGB LED, physical button, WM8960 audio codec |
+| Display / Audio | Whisplay HAT — 240×280 LCD, RGB LED, physical button, WM8960 audio codec (card 2) |
 | Camera | Freenove FNK0085 CSI camera module |
 | Power | 5V/3A non-PD adapter (PD adapters cause instability under NPU load) |
 
@@ -25,6 +25,7 @@ A voice-first, mostly-offline AI assistant running on a **Raspberry Pi 5** with 
 - **Tool calling** — LLM can invoke tools via structured `<tool_call>` blocks
 - **n8n integration** — add new tools as n8n webhook workflows without changing code
 - **Vision on demand** — camera captures on tool call; cloud vision provider (placeholder → Gemini/OpenAI)
+- **In-process display driver** — WhisPlayBoard drives LCD/LED/button directly via GPIO/SPI (no sidecar)
 - **Fully configurable** — `config.yaml` for structure, `.env` for secrets
 
 ---
@@ -38,7 +39,7 @@ All AI models run on the LLM8850's 8GB VRAM:
 | LLM | Qwen3-4B (w8a16 int8) | ~6.3 GB | 8000 |
 | ASR | Whisper-Small | ~0.5 GB | 8801 |
 | TTS | Kokoro-82M | ~0.3 GB | 8803 |
-| Display sidecar | chatbot-ui.py | CPU only | 12345 (TCP) |
+| Display | WhisPlayBoard (in-process GPIO/SPI) | CPU only | — |
 
 > Vision (InternVL) is not resident — vision queries use a cloud provider to stay within the 8GB budget.
 
@@ -47,19 +48,23 @@ All AI models run on the LLM8850's 8GB VRAM:
 ## Project Structure
 
 ```
-assistant/
+PiAi-Assistant/
 ├── config.yaml              # Service topology, model settings, UI theme
 ├── .env.template            # API key template — copy to .env
 ├── .env                     # Secrets (gitignored)
 ├── requirements.txt
-├── start.sh                 # Convenience launcher
+├── start.sh                 # Convenience launcher (manual/dev)
 ├── main.py                  # Entry point
+├── services/                # NPU service launchers + display driver
+│   ├── llm/serve.sh         # Starts tokenizer + main_api_axcl_aarch64
+│   ├── asr/serve.sh         # Starts Whisper Flask server
+│   ├── tts/serve.sh         # Starts Kokoro TTS server
+│   └── display/WhisPlay.py  # Whisplay HAT driver (LCD, LED, button)
 ├── systemd/                 # Systemd unit files for production
-│   ├── assistant-llm.service
-│   ├── assistant-asr.service
-│   ├── assistant-tts.service
-│   ├── assistant-display.service
-│   └── assistant-orchestrator.service
+│   ├── piAi-llm.service
+│   ├── piAi-asr.service
+│   ├── piAi-tts.service
+│   └── piAi-orchestrator.service
 ├── docs/
 │   ├── ARCHITECTURE.md      # Component and service architecture
 │   ├── DATA_FLOW.md         # Pipeline data flows with sequence diagrams
@@ -67,7 +72,7 @@ assistant/
 └── src/
     ├── config.py            # Typed config dataclasses
     ├── orchestrator.py      # State machine + pipeline loop
-    ├── services/            # HTTP clients (LLM, ASR, TTS, vision, display)
+    ├── services/            # HTTP clients (LLM, ASR, TTS, vision) + display driver wrapper
     ├── audio/               # Recorder (VAD) + player (aplay)
     ├── memory/              # ChromaDB store + sentence-transformers embedder
     ├── tools/               # Tool registry, camera, home stub, n8n client
@@ -81,28 +86,31 @@ assistant/
 ### 1. Prerequisites
 
 ```bash
-# System packages (Pi OS / Ubuntu)
+# System packages (Pi OS Bookworm)
 sudo apt install python3-picamera2 python3-dev libportaudio2 alsa-utils
 
-# Python dependencies
-pip install -r requirements.txt
+# Create the piAi conda environment
+conda create -n piAi python=3.11 -y
+
+# Install Python dependencies into piAi env
+~/miniforge3/envs/piAi/bin/pip install -r requirements.txt
 ```
 
 ### 2. Configure
 
 ```bash
 cp .env.template .env
-# Edit .env — add API keys if using cloud vision
-# Edit config.yaml — adjust ports, voice, thresholds as needed
+# Edit .env — add API keys if using cloud vision or n8n
+# Review config.yaml — adjust voice, thresholds, or assistant name
 ```
 
-### 3. Start NPU services
+### 3. Start NPU services (or use systemd)
 
-Start the LLM, ASR, and TTS services (see `systemd/` for production setup):
+The NPU services are managed by systemd and start automatically on boot. For a manual run:
 
 ```bash
 # LLM (Qwen3-4B) — takes ~133s to initialise
-cd ~/PiAi/Qwen3-4B
+cd ~/Qwen3-4B
 python3 qwen3_tokenizer_uid.py --port 12300 &
 sleep 8
 ./main_api_axcl_aarch64 --url_tokenizer_model http://127.0.0.1:12300 \
@@ -122,7 +130,7 @@ cd ~/kokoro.LM8850 && python3 kokoro_svr.py --port 8803 &
 ### 4. Run
 
 ```bash
-cd ~/PiAi/assistant
+cd ~/PiAi-Assistant
 ./start.sh
 ```
 
@@ -155,7 +163,7 @@ memory:
   enabled: true
   top_k: 3                   # Number of memory chunks to retrieve per query
 
-A:
+assistant:
   name: Jarvis               # Assistant name shown on display
 ```
 
@@ -188,20 +196,20 @@ No code changes required.
 
 ```bash
 # Copy unit files
-sudo cp systemd/*.service /etc/systemd/system/
+sudo cp ~/PiAi-Assistant/systemd/piAi-*.service /etc/systemd/system/
 
-# Edit paths in each unit file (replace /home/pi/PiAi with your actual paths)
-sudo nano /etc/systemd/system/assistant-llm.service
-
-# Enable and start
+# Enable services (start on boot)
 sudo systemctl daemon-reload
-sudo systemctl enable assistant-llm assistant-asr assistant-tts \
-                       assistant-display assistant-orchestrator
-sudo systemctl start assistant-llm assistant-asr assistant-tts \
-                      assistant-display assistant-orchestrator
+sudo systemctl enable piAi-llm piAi-asr piAi-tts piAi-orchestrator
+
+# Start now
+sudo systemctl start piAi-llm piAi-asr piAi-tts
+# Wait ~2 minutes, then:
+sudo systemctl start piAi-orchestrator
 
 # View logs
-journalctl -u assistant-orchestrator -f
+journalctl -u piAi-orchestrator -f
+journalctl -u piAi-llm piAi-asr piAi-tts piAi-orchestrator -f
 ```
 
 ---
@@ -212,12 +220,14 @@ journalctl -u assistant-orchestrator -f
 # NPU temperature, memory, and utilisation
 axcl-smi
 
-# Service logs
-journalctl -u assistant-orchestrator -f
-journalctl -u assistant-llm -f
+# Service status
+sudo systemctl status piAi-llm piAi-asr piAi-tts piAi-orchestrator
 
-# Assistant logs
-tail -f data/logs/assistant.log
+# Service logs (live)
+journalctl -u piAi-orchestrator -f
+
+# Application log file
+tail -f ~/PiAi-Assistant/data/logs/assistant.log
 ```
 
 > The LLM8850 can reach 70°C under full load. Ensure the active cooling fan is running.
@@ -234,7 +244,7 @@ tail -f data/logs/assistant.log
 
 ## Acknowledgements
 
-- [whisplay-ai-chatbot-llm8850](https://github.com/m5stack/whisplay-ai-chatbot-llm8850) — reference chatbot and display sidecar
+- [Whisplay](https://github.com/m5stack/Whisplay) — Whisplay HAT hardware driver (WhisPlay.py)
 - [CAAL](https://github.com/caal-project/caal) — n8n tool pattern, ToolDataCache, and memory_hint design
 - [whisper.axcl](https://github.com/PiSugar/whisper.axcl) — Whisper ASR on LLM8850
 - [kokoro.LM8850](https://github.com/m5stack/kokoro.LM8850) — Kokoro TTS on LLM8850

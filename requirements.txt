@@ -3,8 +3,10 @@
 #
 # Pi-specific notes:
 #   picamera2: install via apt FIRST: sudo apt install python3-picamera2
-#   webrtcvad: requires Python headers: sudo apt install python3-dev
+#   webrtcvad-wheels: use this instead of webrtcvad (avoids pkg_resources issue on Python 3.11)
 #   sounddevice: requires PortAudio: sudo apt install libportaudio2
+#   spidev: required by WhisPlayBoard for SPI LCD access
+#   RPi.GPIO: required by WhisPlayBoard for GPIO button + LED
 
 # --- Config & env ---
 python-dotenv>=1.0.0
@@ -16,15 +18,22 @@ requests>=2.31.0
 # --- Audio capture & processing ---
 sounddevice>=0.4.6
 soundfile>=0.12.1
-webrtcvad>=2.0.10
+webrtcvad-wheels>=2.0.14
 numpy>=1.26.0
 
 # --- Memory / RAG ---
 chromadb>=0.5.0
 sentence-transformers>=3.0.0
 
-# --- Image handling (camera tool) ---
+# --- Image handling (camera tool + LCD display) ---
 Pillow>=10.0.0
+
+# --- Whisplay HAT hardware drivers ---
+# Note: RPi.GPIO from PyPI (0.7.1) does NOT support Raspberry Pi 5.
+# Use rpi-lgpio instead — it provides the RPi.GPIO API on top of lgpio,
+# which works correctly on Pi 5.
+rpi-lgpio>=0.6
+spidev>=3.5
 
 # --- picamera2 is installed via apt, not pip ---
 # sudo apt install python3-picamera2
