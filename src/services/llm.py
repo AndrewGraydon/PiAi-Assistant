@@ -1,15 +1,20 @@
 """
 LLM client for PiAi Assistant.
 
-Talks to the Qwen3-4B inference binary (main_axcl_aarch64) running on the
+Talks to the Qwen3-4B inference binary (main_api_axcl_aarch64) running on the
 LLM8850 NPU via port 8000.
 
 API flow (not OpenAI-compatible):
   1. POST /api/reset       {"system_prompt": "..."}   — resets context + sets system prompt
+                           IMPORTANT: reset() internally prefills the system prompt KV cache.
+                           The LLM is BUSY for ~1-2s after reset(). We must poll
+                           generate_provider until done=True before calling generate().
   2. POST /api/generate    {"prompt": "...", "temperature": 0.7, "top-k": 40}
+                           Returns 400 "llm is running" if called while busy.
   3. GET  /api/generate_provider  (poll every 500ms)  → {"done": bool, "response": str}
 
 Key behaviours:
+  - reset() waits for the system prompt prefill to complete before returning
   - generate() polls until done=True, accumulating response chunks
   - Checks interrupt_flag on every poll cycle for button-press cancellation
   - Detects "SetKVCache failed" NPU error and truncates gracefully
@@ -48,10 +53,34 @@ class LLMClient:
         self.enable_thinking = enable_thinking
         self.poll_interval_s = poll_interval_ms / 1000.0
 
+    def _wait_for_idle(self, timeout_s: float = 10.0) -> bool:
+        """
+        Poll /api/generate_provider until done=True or timeout.
+        Returns True if the LLM became idle, False on timeout/error.
+        """
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            try:
+                resp = requests.get(
+                    f"{self.host}/api/generate_provider", timeout=3.0
+                )
+                data = resp.json()
+                if data.get("done", False):
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.25)
+        log.warning("Timed out waiting for LLM to become idle")
+        return False
+
     def reset(self, system_prompt: str) -> None:
         """
         POST /api/reset — must be called before each generate() call.
         Resets the LLM's internal KV cache and sets the system prompt.
+
+        CRITICAL: After /api/reset the LLM internally prefills the system
+        prompt KV cache and is BUSY for ~1-2 seconds. We poll until
+        done=True before returning so that generate() can safely follow.
 
         If thinking is disabled, appends "/no_think" to the system prompt
         (Qwen3 convention for disabling chain-of-thought).
@@ -68,8 +97,17 @@ class LLMClient:
             )
             if resp.status_code not in (200, 204):
                 log.warning("LLM reset returned status %d", resp.status_code)
+                return
         except requests.RequestException as e:
             log.warning("LLM reset failed (non-fatal): %s", e)
+            return
+
+        # Wait for system prompt prefill to complete before returning.
+        # Without this, the immediately following generate() call hits 400
+        # "llm is running" because the reset's internal KV prefill is still running.
+        log.debug("Waiting for LLM reset prefill to complete...")
+        self._wait_for_idle(timeout_s=10.0)
+        log.debug("LLM reset complete — ready to generate")
 
     def generate(
         self,

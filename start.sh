@@ -38,10 +38,12 @@ if [ -n "$CARD_INDEX" ]; then
     # Speaker output volume
     amixer -c "$CARD_INDEX" cset name='Speaker Playback Volume' 114,114 2>/dev/null || \
         amixer -c "$CARD_INDEX" set Speaker 114 2>/dev/null || true
-    # Microphone capture: max PGA gain, boost stage enabled
-    amixer -c "$CARD_INDEX" cset numid=1 63,63    2>/dev/null || true  # Capture Volume -> max
-    amixer -c "$CARD_INDEX" cset numid=9 3        2>/dev/null || true  # Left  Input Boost LINPUT1 -> +29dB
-    amixer -c "$CARD_INDEX" cset numid=8 3        2>/dev/null || true  # Right Input Boost RINPUT1 -> +29dB
+    # Microphone capture: PGA at 40/63 to avoid clipping; boost stage at +20dB
+    # NOTE: numid=1 at 63 (max) clips badly — VAD sees noise as speech. 40 is the sweet spot.
+    # numid=8/9 at 3 (+29dB) also clips; 2 (+20dB) gives clean signal without saturation.
+    amixer -c "$CARD_INDEX" cset numid=1 40,40    2>/dev/null || true  # Capture Volume -> 40/63
+    amixer -c "$CARD_INDEX" cset numid=9 2        2>/dev/null || true  # Left  Input Boost LINPUT1 -> +20dB
+    amixer -c "$CARD_INDEX" cset numid=8 2        2>/dev/null || true  # Right Input Boost RINPUT1 -> +20dB
     amixer -c "$CARD_INDEX" cset numid=50 on      2>/dev/null || true  # Left  Input Mixer Boost Switch -> on
     amixer -c "$CARD_INDEX" cset numid=51 on      2>/dev/null || true  # Right Input Mixer Boost Switch -> on
 else

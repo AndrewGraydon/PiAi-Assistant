@@ -17,9 +17,9 @@ ExecStartPre=/bin/sleep 5
 ExecStartPre=/bin/bash -c '\
   CARD=$(awk "/wm8960soundcard/{print $1}" /proc/asound/cards 2>/dev/null | head -n1); \
   [ -z "$CARD" ] && exit 0; \
-  amixer -c "$CARD" cset numid=1 63,63 2>/dev/null; \
-  amixer -c "$CARD" cset numid=9 3     2>/dev/null; \
-  amixer -c "$CARD" cset numid=8 3     2>/dev/null; \
+  amixer -c "$CARD" cset numid=1 40,40 2>/dev/null; \
+  amixer -c "$CARD" cset numid=9 2     2>/dev/null; \
+  amixer -c "$CARD" cset numid=8 2     2>/dev/null; \
   amixer -c "$CARD" cset numid=50 on   2>/dev/null; \
   amixer -c "$CARD" cset numid=51 on   2>/dev/null; \
   amixer -c "$CARD" cset name="Speaker Playback Volume" 114,114 2>/dev/null || true'
