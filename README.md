@@ -105,18 +105,18 @@ Start the LLM, ASR, and TTS services (see `systemd/` for production setup):
 cd ~/PiAi/Qwen3-4B
 python3 qwen3_tokenizer_uid.py --port 12300 &
 sleep 8
-./main_axcl_aarch64 --url_tokenizer_model http://127.0.0.1:12300 \
+./main_api_axcl_aarch64 --url_tokenizer_model http://127.0.0.1:12300 \
   --template_filename_axmodel "qwen3-4b-ax650/qwen3_p128_l%d_together.axmodel" \
-  --axmodel_num 36 --filename_post_axmodel qwen3-4b-ax650/qwen3_post.axmodel \
+  --axmodel_num 28 --filename_post_axmodel qwen3-4b-ax650/qwen3_post.axmodel \
   --filename_tokens_embed qwen3-4b-ax650/model.embed_tokens.weight.bfloat16.bin \
   --tokens_embed_num 151936 --tokens_embed_size 2560 \
-  --use_mmap_load_embed 1 --live_print 1 --devices 0 &
+  --use_mmap_load_embed 1 --devices 0 &
 
 # ASR (Whisper)
-cd ~/PiAi/whisper.axcl && python3 server/main.py &
+cd ~/whisper.axcl && python3 server/main.py &
 
 # TTS (Kokoro)
-cd ~/PiAi/kokoro.LM8850 && python3 kokoro_svr.py --port 8803 &
+cd ~/kokoro.LM8850 && python3 kokoro_svr.py --port 8803 &
 ```
 
 ### 4. Run
