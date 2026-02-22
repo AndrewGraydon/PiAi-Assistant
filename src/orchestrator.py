@@ -25,11 +25,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import re
+import subprocess
 import threading
 import time
 from enum import Enum, auto
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from src.config import Config
 from src.services.asr import ASRClient
@@ -233,6 +235,9 @@ class Orchestrator:
         if self.battery_monitor:
             self.battery_monitor.start()
 
+        # Set speaker volume from config
+        self._set_speaker_volume(self.config.audio.speaker_volume)
+
         log.info(
             "%s is ready. Press the button to speak.",
             self.config.assistant.name,
@@ -279,7 +284,7 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _pipeline_thread(self) -> None:
-        """Full voice pipeline: record → ASR → LLM → TTS → play."""
+        """Full voice pipeline: record → ASR → LLM (with streaming TTS) → IDLE."""
         self._interrupt_flag.clear()
         self.tool_cache.clear()
 
@@ -311,6 +316,9 @@ class Orchestrator:
 
             log.info("Utterance: %r", utterance)
 
+            # Show transcribed speech on display
+            self.display.set_response_text(f'"{utterance}"')
+
             # 3. Retrieve memory context
             context_chunks: List[str] = []
             if self.memory:
@@ -318,22 +326,97 @@ class Orchestrator:
                 if context_chunks:
                     log.debug("RAG context: %d chunks", len(context_chunks))
 
-            # 4. Think / generate
+            # 4. Think / generate with streaming TTS
             self._transition(State.THINKING)
-            final_response = self._run_tool_chain(utterance, context_chunks)
+
+            # Streaming TTS: queue complete sentences for synthesis+playback
+            # while the LLM is still generating more text.
+            tts_q: queue.Queue[Optional[str]] = queue.Queue()
+            spoken_count = [0]       # mutable int for closure
+            tts_started = threading.Event()
+
+            def _on_llm_progress(text: str) -> None:
+                """Stream LLM text to display and queue sentences for TTS."""
+                clean = self._strip_think_tags(text)
+                self.display.set_response_text(clean, follow_tail=True)
+                # Queue complete sentences (skip last — may still be growing)
+                sentences = self._split_sentences(clean)
+                while spoken_count[0] < len(sentences) - 1:
+                    tts_q.put(sentences[spoken_count[0]])
+                    spoken_count[0] += 1
+                    if not tts_started.is_set():
+                        tts_started.set()
+                        self._transition(State.SPEAKING)
+
+            def _on_tool_round_reset() -> None:
+                """Clear queued TTS when a tool call round resets."""
+                spoken_count[0] = 0
+                while not tts_q.empty():
+                    try:
+                        tts_q.get_nowait()
+                    except queue.Empty:
+                        break
+                tts_started.clear()
+
+            def _tts_worker() -> None:
+                """Synthesize and play sentences from the queue."""
+                while True:
+                    sentence = tts_q.get()
+                    if sentence is None:
+                        break
+                    if self._interrupt_flag.is_set():
+                        while not tts_q.empty():
+                            try:
+                                tts_q.get_nowait()
+                            except queue.Empty:
+                                break
+                        break
+                    clean = self._purify_for_tts(sentence)
+                    if len(clean.split()) < 2:
+                        continue
+                    wav = self.tts.synthesize(clean)
+                    if wav and not self._interrupt_flag.is_set():
+                        self.player.play(wav)
+
+            tts_thread = threading.Thread(
+                target=_tts_worker, daemon=True, name="tts-stream"
+            )
+            tts_thread.start()
+
+            final_response = self._run_tool_chain(
+                utterance, context_chunks,
+                on_progress=_on_llm_progress,
+                on_tool_round_reset=_on_tool_round_reset,
+            )
 
             if not final_response or self._interrupt_flag.is_set():
+                tts_q.put(None)
+                tts_thread.join(timeout=5.0)
                 self._transition(State.IDLE)
                 return
+
+            # Queue remaining sentences (last sentence wasn't queued during streaming)
+            all_sentences = self._split_sentences(final_response)
+            for s in all_sentences[spoken_count[0]:]:
+                tts_q.put(s)
+            tts_q.put(None)  # sentinel
+
+            if not tts_started.is_set():
+                self._transition(State.SPEAKING)
+
+            # Switch display to normal scroll-from-top mode
+            self.display.set_response_text(
+                final_response,
+                scroll_speed=self.config.display_theme.scroll_speed,
+            )
 
             # 5. Store exchange in memory (skip garbled output)
             if self.memory and self._is_valid_response(final_response):
                 summary = f"User: {utterance}\nAssistant: {final_response}"
                 self.memory.add(summary)
 
-            # 6. Speak
-            self._transition(State.SPEAKING)
-            self._speak_response(final_response)
+            # Wait for TTS to finish playing
+            tts_thread.join()
 
         except Exception:
             log.exception("Unhandled pipeline error")
@@ -346,7 +429,13 @@ class Orchestrator:
     # Tool chain (CAAL non-streaming pattern)
     # ------------------------------------------------------------------
 
-    def _run_tool_chain(self, utterance: str, context_chunks: List[str]) -> str:
+    def _run_tool_chain(
+        self,
+        utterance: str,
+        context_chunks: List[str],
+        on_progress: Optional[Callable[[str], None]] = None,
+        on_tool_round_reset: Optional[Callable[[], None]] = None,
+    ) -> str:
         """
         Run a tool-execution loop:
           1. Generate with current prompt (includes RAG context + tool descriptions)
@@ -356,6 +445,11 @@ class Orchestrator:
         The system prompt (personality) is baked into the binary at startup
         via --system_prompt CLI arg. Dynamic context (RAG memory, tool
         descriptions) is prepended to the user prompt here.
+
+        on_progress: callback invoked with accumulated text during generation
+                     (for streaming to display + TTS).
+        on_tool_round_reset: callback invoked when a tool call is detected,
+                             allowing the caller to clear any queued TTS.
 
         Runs up to config.llm.max_tool_rounds iterations.
         """
@@ -371,7 +465,11 @@ class Orchestrator:
             full_prompt = f"{tool_context}\n\n{prompt}" if tool_context else prompt
 
             log.debug("LLM generate (round %d)", round_num + 1)
-            raw = self.llm.generate(full_prompt, interrupt_flag=self._interrupt_flag)
+            raw = self.llm.generate(
+                full_prompt,
+                interrupt_flag=self._interrupt_flag,
+                on_progress=on_progress,
+            )
 
             if not raw or self._interrupt_flag.is_set():
                 return ""
@@ -383,6 +481,10 @@ class Orchestrator:
             if tool_call is None:
                 # No tool call — this is the final response
                 return self._strip_think_tags(raw)
+
+            # Tool call detected — reset streaming TTS state
+            if on_tool_round_reset:
+                on_tool_round_reset()
 
             # Execute the tool
             tool_name = tool_call.get("name", "")
@@ -477,6 +579,29 @@ class Orchestrator:
             return False
         return True
 
+    def _set_speaker_volume(self, volume_pct: int) -> None:
+        """Set WM8960 speaker volume. volume_pct: 0-100."""
+        alsa_val = int(volume_pct * 127 / 100)
+        try:
+            # Detect WM8960 card index from /proc/asound/cards
+            card = None
+            with open("/proc/asound/cards") as f:
+                for line in f:
+                    if "wm8960" in line:
+                        card = line.strip().split()[0]
+                        break
+            if not card:
+                log.debug("No WM8960 card found — skipping volume set")
+                return
+            subprocess.run(
+                ["amixer", "-c", card, "cset",
+                 f"name=Speaker Playback Volume", f"{alsa_val},{alsa_val}"],
+                capture_output=True, timeout=5,
+            )
+            log.info("Speaker volume set to %d%% (ALSA %d/127)", volume_pct, alsa_val)
+        except Exception as e:
+            log.warning("Could not set speaker volume: %s", e)
+
     def _split_sentences(self, text: str) -> List[str]:
         """
         Split response text into sentences for sentence-by-sentence TTS.
@@ -506,10 +631,9 @@ class Orchestrator:
         Split text into sentences, synthesize each with TTS, play in order.
         Checks interrupt_flag before each sentence.
         """
-        self.display.send({
-            "text": text,
-            "scroll_speed": 3,
-        })
+        self.display.set_response_text(
+            text, scroll_speed=self.config.display_theme.scroll_speed
+        )
 
         sentences = self._split_sentences(text)
         log.debug("Speaking %d sentence(s)", len(sentences))
@@ -569,6 +693,7 @@ class Orchestrator:
                 "status": "speaking",
                 "emoji": t.speak_emoji,
                 "RGB": t.speak_color,
+                "text": "Speaking...",
                 "brightness": t.brightness,
             },
         }
@@ -576,6 +701,10 @@ class Orchestrator:
         payload = state_map.get(new_state, {})
         if payload:
             self.display.send(payload)
+
+        # Clear scrolling response text when leaving SPEAKING state
+        if new_state != State.SPEAKING:
+            self.display.set_response_text("")
 
         log.debug("State: %s", new_state.name)
 

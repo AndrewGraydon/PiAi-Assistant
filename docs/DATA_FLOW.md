@@ -46,8 +46,12 @@ The most common path — user asks a question, assistant responds in speech.
 │                                        {"recognition":"what time..."}│
 │                                                      │              │
 │                                          ┌─── TRANSCRIBING → THINKING ──┐│
-│                                          │   display: 🤔 orange   │ │
-│                                          └───────────────────────────┘│
+│                                          │   display: 🤔 orange         │ │
+│                                          │   text area: "utterance"     │ │
+│                                          └───────────────────────────────┘│
+│                                                      │              │
+│                                        display shows user's utterance │
+│                                        in text area (quoted)          │
 │                                                      │              │
 │                                        Embedder.embed(utterance)    │
 │                                        (~50-100ms on Pi CPU)        │
@@ -56,40 +60,38 @@ The most common path — user asks a question, assistant responds in speech.
 │                                        → top-k context chunks       │
 │                                                      │              │
 │                                        _build_context_block()        │
-│                                        (tool descs + RAG context    │
-│                                         prepended to user prompt)   │
+│                                        (RAG context prepended to    │
+│                                         user prompt)                │
 │                                                      │              │
-│                                        LLMClient.generate(prompt)   │
+│                                        LLMClient.generate(prompt,   │
+│                                           on_progress=callback)     │
 │                                        POST /api/generate           │
 │                                                      │              │
 │                                        ┌──── poll loop (500ms) ────┐│
 │                                        │ GET /api/generate_provider ││
-│                                        │ {"done":false,"response":""}││
-│                                        │ ...                        ││
-│                                        │ {"done":true,"response":""}││
+│                                        │ on_progress → display text ││
+│                                        │   (streams to text area)   ││
+│                                        │ on_progress → queue TTS    ││
+│                                        │   (complete sentences)     ││
 │                                        └───────────────────────────┘│
 │                                        (~3-8s at 3.65 tok/s)        │
+│                                                      │              │
+│                                        ┌── THINKING → SPEAKING ────┐│
+│                                        │  (auto when 1st sentence  ││
+│                                        │   complete during gen)    ││
+│                                        └───────────────────────────┘│
+│                                                      │              │
+│       │                               TTS worker thread:            │
+│  [hears response]                       picks sentences from queue  │
+│  (starts during LLM gen)                synthesize → play → next    │
 │                                                      │              │
 │                                        _parse_tool_call() → None    │
 │                                        _strip_think_tags()          │
 │                                        final_response ready         │
 │                                                      │              │
+│                                        remaining sentences queued   │
 │                                        memory.add(summary)          │
-│                                                      │              │
-│                                          ┌─── THINKING → SPEAKING ──┐│
-│                                          │   display: 🗣️ blue     │ │
-│                                          │   text: full response    │ │
-│                                          └───────────────────────────┘│
-│                                                      │              │
-│                                        for sentence in sentences:   │
-│                                          TTSClient.synthesize()     │
-│                                          POST /synthesize           │
-│                                          → Kokoro NPU (~0.5-1s)    │
-│                                          → WAV saved to data/tts/  │
-│                                          AudioPlayer.play(wav)      │
-│                                          aplay subprocess           │
-│       │                                              │              │
-│  [hears response]                                    │              │
+│                                        wait for TTS worker to finish│
 │                                                      │              │
 │                                          ┌─── SPEAKING → IDLE ──────┐│
 │                                          │   display: 😴 dark blue │ │
@@ -104,10 +106,11 @@ The most common path — user asks a question, assistant responds in speech.
 | User finishes speaking | 2.0s | VAD silence detection |
 | Whisper ASR | 1–3s | Whisper-Small on NPU |
 | Embedding + RAG | ~150ms | CPU only |
-| LLM generate (50 tokens) | 3–8s | Qwen3-4B at 3.65 tok/s |
-| TTS first sentence | 0.5–1s | Kokoro on NPU |
-| Audio playback | real-time | — |
-| **Total to first audio** | **~7–14s** | From button release |
+| LLM 1st sentence generated | 1–3s | ~10 tokens at 3.65 tok/s |
+| TTS first sentence | 0.5–1s | Kokoro on NPU (overlaps LLM gen) |
+| Audio playback | real-time | Starts while LLM still generating |
+| LLM total generation | 3–8s | ~50 tokens |
+| **Total to first audio** | **~5–8s** | Streaming TTS starts mid-generation |
 
 ---
 
@@ -271,21 +274,24 @@ All n8n workflows called as tools must return this JSON structure:
 User presses button mid-response to cancel.
 
 ```
-State: SPEAKING
+State: THINKING or SPEAKING
   │
   ▼
 WhisPlayBoard GPIO interrupt ──► _on_button_pressed() (in-process callback)
                                             │
                                     interrupt_flag.set()
-                                    player.stop()          ← aplay terminated
+                                    player.stop()          ← aplay terminated immediately
                                     _transition(IDLE)
                                     pipeline_running.clear()
                                             │
                                     LLM poll loop checks interrupt_flag
                                     ──► exits immediately if mid-generation
                                             │
-                                    _speak_response() checks interrupt_flag
-                                    ──► skips remaining sentences
+                                    TTS worker thread checks interrupt_flag
+                                    ──► drains queue, exits loop
+                                            │
+                                    _pipeline_thread() finally block
+                                    ──► transitions to IDLE, clears display
 ```
 
 Note: Because WhisPlayBoard fires the callback in-process via a GPIO interrupt thread, there is no TCP round-trip — interrupt latency is sub-millisecond from button press to `interrupt_flag.set()`.
@@ -379,30 +385,47 @@ The NPU services (`piAi-llm`, `piAi-asr`, `piAi-tts`) are managed by systemd and
 
 ## 8. Display Update Flow
 
-How the orchestrator updates the Whisplay HAT display during state transitions.
+How the orchestrator updates the Whisplay HAT display. The LCD uses a two-part layout with a background render thread at 30fps.
 
 ```
 Orchestrator._transition(new_state)
      │
      ▼
-DisplayClient.send({
-    "status":     "thinking",
-    "emoji":      "🤔",
-    "RGB":        "#ff6800",
-    "text":       "Thinking...",
-    "brightness": 80
-})
+DisplayClient.send({status, emoji, RGB, text, brightness})
      │  (all in-process — no network hop)
      ▼
-DisplayClient._send_to_board(payload)  [thread-safe lock]
+DisplayClient.send()  [thread-safe lock]
      │
-     ├─ board.set_backlight(brightness)   ← PWM to LCD backlight
-     ├─ board.set_rgb(r, g, b)            ← PWM to RGB LED
-     └─ _render_lcd(board, emoji, text)
+     ├─ board.set_backlight(brightness)          ← PWM to LCD backlight
+     ├─ spawn _fade_rgb(r, g, b) thread          ← smooth LED colour transition
+     └─ _render_header(board, emoji, status, battery)
            │
-           ├─ PIL.Image(240×280, black)
-           ├─ Draw emoji at 72pt (centre)
-           ├─ Draw text at 22pt (bottom)
-           ├─ Convert to RGB565 bytes
-           └─ board.draw_image(0, 0, 240, 280, data)  ← SPI to LCD
+           ├─ PIL.Image(240×98, black)            ← header only
+           ├─ Row 1: status text (24pt, x=20) + battery icon (top-right)
+           ├─ Row 2: emoji (40pt, centred)
+           ├─ numpy RGB565 conversion
+           └─ board.draw_image(0, 0, 240, 98)    ← SPI header region
+
+DisplayClient.set_response_text(text, scroll_speed, follow_tail)
+     │
+     ▼
+Sets _response_text, _scroll_offset, _text_dirty
+Wakes render thread
+     │
+     ▼
+Render thread (30fps, lcd-render)  [thread-safe lock]
+     │
+     ├─ If _text_dirty:
+     │    _render_text_area(board, text, scroll_offset)
+     │       ├─ PIL.Image(240×182, black)          ← text area only
+     │       ├─ Word-wrap text at 220px width
+     │       ├─ Draw visible lines offset by scroll_offset
+     │       ├─ numpy RGB565 conversion
+     │       └─ board.draw_image(0, 98, 240, 182)  ← SPI text region
+     │
+     └─ If scrolling (scroll_speed > 0):
+          Increment scroll_offset, redraw text area
+          Sleep until next frame (stop when bottom reached)
 ```
+
+**Streaming flow:** During LLM generation, `on_progress` callback calls `set_response_text(text, follow_tail=True)` on every poll cycle (~500ms). The render thread redraws the text area with scroll snapped to the bottom so the latest text is always visible.

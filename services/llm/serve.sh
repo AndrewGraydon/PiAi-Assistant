@@ -42,8 +42,20 @@ echo "Starting Qwen3 tokenizer server on port $PORT..."
 python qwen3_tokenizer_uid.py --port $PORT &
 TOKENIZER_PID=$!
 
-# Wait for tokenizer to be ready
-sleep 8
+# Wait for tokenizer to be ready (poll until it responds, max 30s)
+echo "Waiting for tokenizer on port $PORT..."
+for i in $(seq 1 60); do
+    if curl -sf "http://127.0.0.1:$PORT/get_uid" > /dev/null 2>&1; then
+        echo "Tokenizer ready after ${i}s"
+        break
+    fi
+    if [ $i -eq 60 ]; then
+        echo "ERROR: Tokenizer not ready after 60s"
+        kill $TOKENIZER_PID 2>/dev/null || true
+        exit 1
+    fi
+    sleep 1
+done
 
 SYSTEM_PROMPT="Reply in English. Be concise. /no_think"
 

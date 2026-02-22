@@ -207,16 +207,31 @@ ORCHESTRATOR (src/orchestrator.py)
 `services/display/WhisPlay.py` and drives the hardware in-process.
 
 - `WhisPlayBoard` controls LCD (240×280, SPI), RGB LED (PWM), and button (GPIO interrupt)
-- `DisplayClient.send(payload)` updates backlight, RGB LED, and renders emoji + text to LCD via Pillow
-- `DisplayClient.start_event_listener(cb)` registers a GPIO interrupt callback — no polling thread needed
 - Falls back gracefully to no-op if `RPi.GPIO`/`spidev` are unavailable (dev machine)
-- LCD rendering: Pillow draws emoji (72pt) + status text (22pt) → RGB565 pixel array → `draw_image()`
+
+**LCD layout (two-part, inspired by original Whisplay AI chatbot):**
+- **Header (98px):** status text (24pt NotoSans-Bold) + battery icon (row 1), emoji (40pt DejaVuSans) centered (row 2)
+- **Text area (182px):** word-wrapped response text (20pt), auto-scrolling at 30fps
+- LCD has 20px rounded corners → status text inset `CORNER_INSET=20` from left edge
+- Status text width clamped to avoid overlapping battery icon
+
+**Render thread:** Background thread at 30fps handles scrolling animation. Sleeps when no animation needed (no busy-wait). Wakes on new text, battery update, or active scrolling.
+
+**Key methods:**
+- `send(payload)` — updates header (backlight, RGB LED fade, emoji, status text)
+- `set_response_text(text, scroll_speed, follow_tail)` — sets scrollable text area content
+  - `follow_tail=True`: streaming mode — snaps scroll to bottom (used during LLM generation)
+  - `follow_tail=False`: normal mode — scrolls from top to bottom (used during TTS playback)
+- `update_battery_level(level)` — triggers header re-render with new battery percentage
+- `start_event_listener(cb)` — registers GPIO button interrupt; no polling thread needed
+
+**Streaming TTS:** The orchestrator streams LLM text to the display in real-time via `on_progress` callback during generation. Complete sentences are queued for TTS synthesis+playback in a background worker thread, so the user hears speech while the LLM is still generating.
 
 ---
 
 ## LLM Protocol (non-standard — NOT OpenAI API)
 
-The `main_api_axcl_aarch64` binary (note: **api** in name, **axmodel_num=36**) uses a bespoke protocol:
+The `main_api_axcl_aarch64` binary (note: **api** in name, **axmodel_num=28**) uses a bespoke protocol:
 
 ```
 POST /api/reset    {}                            ← clears KV cache, re-prefills --system_prompt

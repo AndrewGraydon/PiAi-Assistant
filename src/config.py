@@ -79,6 +79,7 @@ class AudioConfig:
     vad_aggressiveness: int
     silence_timeout_s: float
     max_record_s: float
+    speaker_volume: int  # 0-100, mapped to ALSA 0-127
 
 
 @dataclass
@@ -119,6 +120,7 @@ class DisplayThemeConfig:
     listen_color: str
     think_color: str
     speak_color: str
+    scroll_speed: int
 
 
 @dataclass
@@ -276,6 +278,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
         vad_aggressiveness=int(audio_raw.get("vad_aggressiveness", 2)),
         silence_timeout_s=float(audio_raw.get("silence_timeout_s", 2.0)),
         max_record_s=float(audio_raw.get("max_record_s", 30.0)),
+        speaker_volume=max(0, min(100, int(audio_raw.get("speaker_volume", 100)))),
     )
 
     # ---- Memory ----
@@ -321,6 +324,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
         listen_color=dt_raw.get("listen_color", "#00ff00"),
         think_color=dt_raw.get("think_color", "#ff6800"),
         speak_color=dt_raw.get("speak_color", "#0055ff"),
+        scroll_speed=int(dt_raw.get("scroll_speed", 3)),
     )
 
     # ---- Battery ----

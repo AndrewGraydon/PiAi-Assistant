@@ -65,12 +65,12 @@ IDLE ──────────────► RECORDING
                          ▼
                      THINKING ──► (tool call loop) ──► THINKING
                          │
-                    final_response ready
+                    first sentence complete (streaming TTS)
                          │
                          ▼
-                     SPEAKING ──► (sentence by sentence TTS + play)
+                     SPEAKING ──► (TTS plays sentences as they stream)
                          │
-                    all sentences played
+                    all sentences played (LLM done + TTS done)
                          │
                          ▼
                         IDLE
@@ -214,16 +214,38 @@ Security: credentials stay encrypted in n8n. The orchestrator only sends paramet
 The `DisplayClient` drives the Whisplay HAT display hardware **in-process** via `WhisPlayBoard` (located at `services/display/WhisPlay.py`). There is no separate sidecar process or TCP socket.
 
 **Hardware controlled:**
-- **LCD** (240×280, SPI): renders emoji (72pt) + status text (22pt) using Pillow → RGB565 → `board.draw_image()`
-- **RGB LED** (GPIO PWM): set via `board.set_rgb(r, g, b)` — colour reflects current state
+- **LCD** (240×280, SPI): two-part layout rendered via Pillow → numpy RGB565 → `board.draw_image()`
+- **RGB LED** (GPIO PWM): smooth fade transitions via `board.set_rgb_fade()` in background thread
 - **Physical button** (GPIO interrupt): registered via `board.on_button_press(callback)` — fires callback in a new thread
+
+**LCD layout (inspired by original Whisplay AI chatbot):**
+```
+┌──────────────────────┐
+│ Status...     [🔋85] │  Header row 1: status text (24pt NotoSans-Bold) + battery
+│        😐            │  Header row 2: emoji (40pt DejaVuSans) centered
+├──────────────────────┤  (header = 98px total)
+│                      │
+│ LLM response text    │  Text area (182px): word-wrapped (20pt NotoSans-Bold)
+│ auto-scrolls when    │  Auto-scrolls at 30fps when text overflows
+│ it overflows...      │
+│                      │
+└──────────────────────┘
+```
+
+**Render thread:** Background thread at 30fps handles text scrolling. Sleeps when no animation is needed (event-driven wake). Redraws only the dirty region (header or text area, not both).
+
+**Fonts:** NotoSans-Bold for status/response text; DejaVuSans for emoji glyphs (NotoSans lacks emoji). Font discovery falls back through a preference list.
 
 **Graceful fallback:** When `RPi.GPIO` / `spidev` are unavailable (dev machine), all methods no-op silently.
 
 **Key methods:**
-- `connect_with_retry(max_retries=3)` — initialises `WhisPlayBoard()`, sets initial backlight
-- `disconnect()` — calls `board.cleanup()` to release GPIO
-- `send(payload)` — thread-safe; updates backlight, RGB LED, and renders LCD from `status`/`emoji`/`text` fields
+- `connect_with_retry(max_retries=3)` — initialises `WhisPlayBoard()`, sets backlight, starts render thread
+- `disconnect()` — stops render thread, calls `board.cleanup()` to release GPIO
+- `send(payload)` — thread-safe; updates backlight, RGB LED (fade), header (emoji/status/battery)
+- `set_response_text(text, scroll_speed, follow_tail)` — sets scrollable text area content
+  - `follow_tail=True`: streaming — snaps to bottom (during LLM generation)
+  - `follow_tail=False`: normal — scrolls top to bottom (during TTS playback)
+- `update_battery_level(level)` — triggers header re-render with new battery percentage
 - `start_event_listener(callback)` — registers GPIO button interrupt; no daemon thread needed
 
 **State → display mapping** (from `config.yaml`):
@@ -319,8 +341,8 @@ NPU services are started separately via systemd before the orchestrator:
 ### Why not OpenAI API format?
 The `main_api_axcl_aarch64` binary uses a bespoke reset/generate/poll protocol, not `/chat/completions`. The `LLMClient` is purpose-built for this API.
 
-### Why sequential TTS (not parallel with generation)?
-Generating the full response first, then splitting into sentences for TTS, is simpler and more reliable at Qwen3-4B's 3.65 tok/s speed. Parallel streaming+TTS adds complexity for minimal perceived latency benefit at this generation rate.
+### Why streaming TTS (parallel with generation)?
+At 3.65 tok/s, Qwen3-4B takes 3-8s to generate a full response. Waiting for the complete response before starting TTS adds noticeable latency. Instead, the orchestrator uses a streaming TTS approach: the `on_progress` callback from `llm.generate()` detects complete sentences during generation and queues them for a background TTS worker thread. This means TTS playback starts as soon as the first sentence is complete — often 2-3s into generation — while the LLM continues generating subsequent sentences. Tool call rounds reset the TTS queue to avoid speaking intermediate responses.
 
 ### Why aplay instead of sounddevice for playback?
 `aplay` handles the WM8960 ALSA constraints cleanly without PortAudio indirection. It's battle-tested on Pi and easy to terminate via subprocess signals.

@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 
@@ -145,6 +145,7 @@ class LLMClient:
         self,
         prompt: str,
         interrupt_flag: Optional[threading.Event] = None,
+        on_progress: Optional[Callable[[str], None]] = None,
     ) -> str:
         """
         Start generation and poll until complete.
@@ -154,16 +155,22 @@ class LLMClient:
         If interrupt_flag is set during polling, returns whatever has been
         accumulated so far (may be partial).
 
+        on_progress: optional callback invoked with accumulated text on each
+        poll cycle, enabling real-time streaming to the display.
+
         Handles "SetKVCache failed" by resetting the KV cache and returning
         whatever was accumulated before the error.
         """
         # Wait for LLM to be idle before starting
+        log.info("LLM waiting for idle...")
         if not self._wait_for_done(timeout_s=_IDLE_WAIT_TIMEOUT_S):
             # Try to force-stop
             self._stop()
             time.sleep(_STOP_SETTLE_S)
             if not self._wait_for_done(timeout_s=3.0):
                 log.warning("LLM still busy — attempting generate anyway")
+
+        log.info("LLM idle — sending generate request")
 
         # Start generation
         try:
@@ -186,9 +193,14 @@ class LLMClient:
             log.error("LLM generate start failed: %s", e)
             return ""
 
+        log.info("LLM generate POST accepted (status %d)", resp.status_code)
+
         # Poll for results
         accumulated = ""
         poll_errors = 0
+        poll_count = 0
+        poll_start = time.time()
+        _POLL_TIMEOUT_S = 60.0  # hard cap to prevent infinite loop
 
         while True:
             # Honour interrupt
@@ -197,7 +209,16 @@ class LLMClient:
                 self._stop()
                 break
 
+            # Hard timeout to prevent infinite polling
+            if time.time() - poll_start > _POLL_TIMEOUT_S:
+                log.error(
+                    "LLM poll timeout after %.0fs (%d polls, %d chars accumulated)",
+                    _POLL_TIMEOUT_S, poll_count, len(accumulated),
+                )
+                break
+
             time.sleep(self.poll_interval_s)
+            poll_count += 1
 
             try:
                 resp = requests.get(
@@ -217,6 +238,9 @@ class LLMClient:
             chunk: str = data.get("response", "")
             done: bool = data.get("done", False)
 
+            if poll_count == 1:
+                log.info("LLM first poll: done=%s, response_len=%d", done, len(chunk))
+
             # Detect NPU KV cache overflow
             if _KV_CACHE_ERROR in chunk:
                 log.warning(
@@ -233,9 +257,17 @@ class LLMClient:
             if chunk:
                 accumulated += chunk
                 log.debug("LLM chunk: %r", chunk[:80])
+                if on_progress and accumulated:
+                    try:
+                        on_progress(accumulated)
+                    except Exception:
+                        pass  # display errors must not break generation
 
             if done:
-                log.debug("LLM generation complete (%d chars)", len(accumulated))
+                log.info(
+                    "LLM generation complete (%d chars, %d polls, %.1fs)",
+                    len(accumulated), poll_count, time.time() - poll_start,
+                )
                 break
 
         return accumulated

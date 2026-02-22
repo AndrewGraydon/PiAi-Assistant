@@ -44,6 +44,7 @@ audio:
   vad_aggressiveness: 2           # 0 (least) to 3 (most aggressive)
   silence_timeout_s: 2.0
   max_record_s: 30
+  speaker_volume: 100             # Speaker volume 0-100 (mapped to ALSA 0-127)
 
 memory:
   enabled: true
@@ -93,6 +94,7 @@ display:
   listen_color: "#00ff00"
   think_color: "#ff6800"
   speak_color: "#0055ff"
+  scroll_speed: 3             # Text scroll speed in px/frame at 15fps (0 = no scroll)
 
 battery:
   enabled: true
