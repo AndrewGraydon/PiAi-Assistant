@@ -302,7 +302,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
     # ---- Assistant ----
     asst_raw = raw.get("A", {})
     assistant = AssistantConfig(
-        name=asst_raw.get("name", "Jarvis"),
+        name=asst_raw.get("name", "PiAi"),
         system_prompt=asst_raw.get("system_prompt", "You are a helpful assistant.").rstrip(),
         tools_enabled=bool(asst_raw.get("tools_enabled", True)),
         thinking_indicator=bool(asst_raw.get("thinking_indicator", True)),

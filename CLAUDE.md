@@ -216,7 +216,7 @@ ORCHESTRATOR (src/orchestrator.py)
 
 ## LLM Protocol (non-standard — NOT OpenAI API)
 
-The `main_api_axcl_aarch64` binary (note: **api** in name, **axmodel_num=28**) uses a bespoke protocol:
+The `main_api_axcl_aarch64` binary (note: **api** in name, **axmodel_num=36**) uses a bespoke protocol:
 
 ```
 POST /api/reset    {}                            ← clears KV cache, re-prefills --system_prompt
@@ -349,7 +349,7 @@ Default: `PlaceholderVisionProvider` (returns canned message — no cloud calls)
 ### Things that will break if you change them
 - **webrtcvad frame size** must be exactly 480 samples (30ms @ 16kHz). Changing `sample_rate` or frame duration will cause VAD errors.
 - **LLM binary is `main_api_axcl_aarch64`** (not `main_axcl_aarch64`). The `api` variant uses port 8000.
-- **axmodel_num is 28** (not 36). Using 36 will cause the LLM to fail loading.
+- **axmodel_num is 36** (all 36 transformer layers). Using 28 produces garbled/garbage output.
 - **LLM port 8000** is the inference binary. Port 12300 is the tokenizer (internal). Never call 12300 from orchestrator code.
 - **LLM system prompt must be a single-line string** in `serve.sh` — embedded newlines break bash argument quoting.
 - **Do NOT call `/api/reset` with a `system_prompt` body** — it doesn't work. The system prompt is only set via the `--system_prompt` CLI arg at binary startup.

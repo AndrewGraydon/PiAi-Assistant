@@ -303,6 +303,12 @@ class Orchestrator:
                 self._transition(State.IDLE)
                 return
 
+            # Filter out known Whisper ASR failure patterns
+            if self._is_asr_garbage(utterance):
+                log.warning("ASR garbage detected, ignoring: %r", utterance)
+                self._transition(State.IDLE)
+                return
+
             log.info("Utterance: %r", utterance)
 
             # 3. Retrieve memory context
@@ -320,8 +326,8 @@ class Orchestrator:
                 self._transition(State.IDLE)
                 return
 
-            # 5. Store exchange in memory
-            if self.memory:
+            # 5. Store exchange in memory (skip garbled output)
+            if self.memory and self._is_valid_response(final_response):
                 summary = f"User: {utterance}\nAssistant: {final_response}"
                 self.memory.add(summary)
 
@@ -437,6 +443,40 @@ class Orchestrator:
         text = text.replace("<think>", "").replace("</think>", "")
         return text.strip()
 
+    # Known Whisper ASR failure patterns (case-insensitive substrings)
+    _ASR_GARBAGE_PATTERNS = [
+        "speaking in foreign language",
+        "foreign language",
+        "inaudible",
+        "music playing",
+        "background noise",
+        "[music]",
+        "(music)",
+    ]
+
+    def _is_asr_garbage(self, text: str) -> bool:
+        """Check if ASR output is a known Whisper hallucination/failure pattern."""
+        lower = text.lower().strip()
+        for pattern in self._ASR_GARBAGE_PATTERNS:
+            if pattern in lower:
+                return True
+        return False
+
+    def _is_valid_response(self, text: str) -> bool:
+        """
+        Check if an LLM response looks like valid English output.
+        Rejects garbled/repetitive text to avoid polluting ChromaDB memory.
+        """
+        if not text or len(text) < 5:
+            return False
+        # Reject if mostly non-ASCII (Chinese, Russian garble from broken generation)
+        ascii_chars = sum(1 for c in text if ord(c) < 128)
+        if ascii_chars / len(text) < 0.7:
+            log.warning("Rejecting non-ASCII response from memory storage (%d%% ASCII)",
+                        int(100 * ascii_chars / len(text)))
+            return False
+        return True
+
     def _split_sentences(self, text: str) -> List[str]:
         """
         Split response text into sentences for sentence-by-sentence TTS.
@@ -543,39 +583,41 @@ class Orchestrator:
     # Context builder
     # ------------------------------------------------------------------
 
+    # Rough char budget for the context block.
+    # The LLM context window is ~1024 tokens total.  System prompt
+    # (~50 tokens) + user utterance (~30-50 tokens) + response (~200-400
+    # tokens) leaves ~500 tokens for context.  At ~4 chars/token that's
+    # ~2000 chars.  Tool descriptions are ~250 chars, leaving ~1750 for
+    # RAG chunks.  We cap the total context block to be safe.
+    _CONTEXT_CHAR_BUDGET = 1500
+
     def _build_context_block(self, context_chunks: List[str]) -> str:
         """
         Build the dynamic context prepended to the user prompt.
 
-        The base personality prompt is baked into the LLM binary at startup
-        (via --system_prompt in serve.sh). This method builds only the
-        dynamic parts that change per conversation:
-          1. Available tool descriptions (built-in + n8n)
-          2. RAG memory context (retrieved per utterance)
+        The base personality prompt and tool descriptions are baked into the
+        LLM binary at startup (via --system_prompt in serve.sh).  This method
+        only adds RAG memory context — tool descriptions are NOT injected
+        here because the small 4B model gets confused by <tool_call> examples
+        appearing in the user prompt.
+
+        The total output is capped at _CONTEXT_CHAR_BUDGET to avoid
+        overflowing the LLM's ~1024 token context window.
         """
-        parts: List[str] = []
+        if not context_chunks:
+            return ""
 
-        # Tool descriptions (built-in + n8n)
-        all_descs = self.tool_registry.get_descriptions()
-        if self.config.n8n.enabled:
-            n8n_descs = self.n8n.get_descriptions()
-            all_descs.update(n8n_descs)
+        # Only include RAG memory context, truncated to budget
+        truncated: List[str] = []
+        used = 0
+        for chunk in context_chunks:
+            if used + len(chunk) > self._CONTEXT_CHAR_BUDGET:
+                break
+            truncated.append(chunk)
+            used += len(chunk)
 
-        if all_descs:
-            tool_lines = [
-                "You have tools. To use one, output a <tool_call> block with valid JSON.",
-                "Only call one tool at a time.\n",
-            ]
-            for name, desc in all_descs.items():
-                tool_lines.append(
-                    f"Tool: {name} — {desc}\n"
-                    f'<tool_call>{{"name": "{name}", "arguments": {{...}}}}</tool_call>'
-                )
-            parts.append("\n".join(tool_lines))
+        if not truncated:
+            return ""
 
-        # RAG memory context
-        if context_chunks:
-            ctx = "\n\n".join(context_chunks)
-            parts.append(f"[Relevant context from memory]\n{ctx}")
-
-        return "\n\n".join(parts)
+        ctx = "\n\n".join(truncated)
+        return f"[Context]\n{ctx}"

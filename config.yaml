@@ -31,8 +31,9 @@ services:
 
 n8n:
   enabled: false                  # Set true + fill url/token to activate
-  url: http://localhost:5678
-  webhook_base: http://localhost:5678/webhook
+  url: http://10.10.0.40:5678
+  webhook_base: http://10.10.0.40:5678/webhook
+  mcp_endpoint: http://10.10.0.40:5678/mcp-server/http
   token: ""                       # Override with N8N_TOKEN in .env
   timeout_s: 30
 
@@ -60,9 +61,9 @@ tools:
     home_automation: true
 
 assistant:
-  name: Jarvis
+  name: PiAi
   system_prompt: |
-    You are Jarvis, a helpful local AI assistant running on a Raspberry Pi.
+    You are PiAi, a helpful local AI assistant running on a Raspberry Pi.
     Be concise — your responses are spoken aloud via text-to-speech.
     Avoid markdown, bullet points, and special characters in your responses.
     Speak naturally, as if having a conversation.

@@ -45,14 +45,14 @@ TOKENIZER_PID=$!
 # Wait for tokenizer to be ready
 sleep 8
 
-SYSTEM_PROMPT="You are Jarvis, a helpful local AI assistant running on a Raspberry Pi. Be concise. Your responses are spoken aloud via text-to-speech. Speak naturally as if having a conversation. Avoid markdown and bullet points. /no_think"
+SYSTEM_PROMPT="Reply in English. Be concise. /no_think"
 
 echo "Starting Qwen3-4B inference binary..."
 echo "System prompt: $SYSTEM_PROMPT"
 ./main_api_axcl_aarch64 \
     --system_prompt "$SYSTEM_PROMPT" \
     --template_filename_axmodel "qwen3-4b-ax650/qwen3_p128_l%d_together.axmodel" \
-    --axmodel_num 28 \
+    --axmodel_num 36 \
     --url_tokenizer_model "http://127.0.0.1:$PORT" \
     --filename_post_axmodel qwen3-4b-ax650/qwen3_post.axmodel \
     --filename_tokens_embed qwen3-4b-ax650/model.embed_tokens.weight.bfloat16.bin \
