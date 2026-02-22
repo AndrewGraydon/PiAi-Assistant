@@ -165,9 +165,10 @@ memory:
   default_hint_ttl_s: 604800    # 7 days
   embedding_model: all-MiniLM-L6-v2
 
-assistant:
+A:
   name: Jarvis
-  # system_prompt: defined in config.yaml — contains tool call examples
+  # system_prompt: in config.yaml but NOT used for LLM — personality is in serve.sh
+  # Tool descriptions are auto-injected from ToolRegistry into user prompt
 
 display:
   brightness: 80
@@ -186,7 +187,7 @@ ORCHESTRATOR (src/orchestrator.py)
        ├── src/audio/recorder.py     sounddevice 16kHz + webrtcvad 30ms frames
        ├── src/audio/player.py       aplay subprocess
        ├── src/services/asr.py       POST /recognize → Whisper :8801
-       ├── src/services/llm.py       reset / generate / poll → Qwen3 :8000
+       ├── src/services/llm.py       generate / poll → Qwen3 :8000 (reset only for KV recovery)
        ├── src/services/tts.py       POST /synthesize → Kokoro :8803
        ├── src/services/display.py   WhisPlayBoard GPIO/SPI (in-process, no TCP)
        ├── src/memory/store.py       ChromaDB cosine search (local SQLite)
@@ -215,20 +216,28 @@ ORCHESTRATOR (src/orchestrator.py)
 
 ## LLM Protocol (non-standard — NOT OpenAI API)
 
-The `main_api_axcl_aarch64` binary (note: **api** in name, **axmodel_num=28**) uses a bespoke 3-step protocol:
+The `main_api_axcl_aarch64` binary (note: **api** in name, **axmodel_num=28**) uses a bespoke protocol:
 
 ```
-POST /api/reset    {"system_prompt": "..."}     ← sets KV cache, call once per query
-POST /api/generate {"prompt": "...", ...}        ← starts generation
+POST /api/reset    {}                            ← clears KV cache, re-prefills --system_prompt
+POST /api/generate {"prompt": "...", ...}        ← starts generation (400 if already running)
 GET  /api/generate_provider  (every 500ms)       ← poll until done=true
   → {"done": false, "response": "partial..."}
   → {"done": true,  "response": "final chunk"}
+POST /api/stop                                   ← abort running generation (404 on old firmware)
 ```
 
+**System prompt architecture:**
+- System prompt is baked into the binary at startup via `--system_prompt` CLI arg in `services/llm/serve.sh`
+- `/api/reset` does **NOT** accept a `system_prompt` JSON field — it re-prefills from the CLI arg
+- `reset()` is only called for KV cache error recovery, **NOT** per-conversation
+- Dynamic context (RAG memory, tool descriptions) is prepended to the **user prompt** by the orchestrator
+
 **Critical behaviours in `src/services/llm.py`:**
-- Appends `"\n/no_think"` to system prompt when `enable_thinking: false`
-- Detects `"SetKVCache failed"` → context window full → truncates, next `reset()` clears it
+- `generate()` waits for `done=True` (idle) before starting; falls back to `_stop()` if busy
+- Detects `"SetKVCache failed"` → context window full → auto-calls `reset()` to recover
 - Checks `interrupt_flag` (threading.Event) on every 500ms poll cycle
+- `/no_think` is included in the serve.sh system prompt (not appended at runtime)
 
 ---
 
@@ -246,7 +255,7 @@ The LLM signals a tool call by emitting a `<tool_call>` block:
 - Think tag stripping: `re.compile(r'<think>.*?</think>', re.DOTALL)`
 
 **Tool chain loop** (CAAL non-streaming pattern, max `max_tool_rounds=5`):
-1. `llm.reset(system_prompt)` — inject RAG context + n8n descriptions
+1. `_build_context_block()` — prepend tool descriptions + RAG memory to user prompt
 2. `llm.generate(prompt)` → check for `<tool_call>`
 3. If tool call found: execute, add result to `ToolDataCache`, build next prompt with result
 4. If no tool call: strip think tags → final response → TTS
@@ -259,7 +268,7 @@ The LLM signals a tool call by emitting a `<tool_call>` block:
 - Cosine distance [0,2] → similarity: `1 - dist/2` → filter by `score_threshold=0.65`
 - `memory.add(text)` — stores conversation summaries after each exchange
 - `memory.add_hint(key, value, ttl_s)` — stores `"key: value"` with expiry metadata
-- `memory.query(utterance)` → top-k chunks injected into system prompt as `## Relevant context from memory:`
+- `memory.query(utterance)` → top-k chunks injected into **user prompt** via `_build_context_block()`
 
 **ToolDataCache** (rolling buffer, last 3 results):
 - Prepended to LLM prompt before each generate call
@@ -342,12 +351,14 @@ Default: `PlaceholderVisionProvider` (returns canned message — no cloud calls)
 - **LLM binary is `main_api_axcl_aarch64`** (not `main_axcl_aarch64`). The `api` variant uses port 8000.
 - **axmodel_num is 28** (not 36). Using 36 will cause the LLM to fail loading.
 - **LLM port 8000** is the inference binary. Port 12300 is the tokenizer (internal). Never call 12300 from orchestrator code.
+- **LLM system prompt must be a single-line string** in `serve.sh` — embedded newlines break bash argument quoting.
+- **Do NOT call `/api/reset` with a `system_prompt` body** — it doesn't work. The system prompt is only set via the `--system_prompt` CLI arg at binary startup.
 - **Tool calls parsed before think tag stripping** — do not reorder this in orchestrator.py.
 - **`plughw:N,0` not `hw:N,0`** for audio capture — `hw:` will fail on WM8960 due to rate mismatch.
 - **WM8960 is card index 2** on this Pi (not 1) — recorder auto-detects, but be aware if hardcoding.
 
 ### Common gotchas
-- **SetKVCache failed** — normal after long conversations. LLM context window (p128) is full. Detected in `llm.generate()`, response truncated, next `reset()` clears it.
+- **SetKVCache failed** — normal after long conversations. LLM context window (~1024 tokens) is full. Detected in `llm.generate()`, auto-calls `reset()` to recover for the next query.
 - **Cosine distance** from ChromaDB is in [0,2] not [0,1]. Conversion: `similarity = 1 - dist/2`.
 - **picamera2** cannot be reused across calls — create a new instance per capture, always call `stop()` + `close()` in a `finally` block.
 - **Very short TTS fragments** (< 2 words) are skipped — Kokoro errors on them.
@@ -405,7 +416,7 @@ ssh andrew@10.10.0.129 "cat ~/.ssh/id_ed25519.pub"
 | Feature | How to add |
 |---|---|
 | New vision provider | Implement `VisionProvider` ABC in `src/services/vision_{name}.py`, add to `create_vision_client()` factory, set `provider:` in config.yaml |
-| New built-in tool | Add class to `src/tools/`, register in `Orchestrator._register_tools()`, add tool description to `assistant.system_prompt` in config.yaml |
+| New built-in tool | Add class to `src/tools/`, register in `Orchestrator._register_tools()` with a `description` — automatically injected into user prompt via `_build_context_block()` |
 | New n8n tool | Create n8n workflow with webhook trigger, add description in node Notes, activate — no code changes needed |
 | Wake word | Add always-on VAD/keyword loop in `src/audio/` and trigger `_on_button_pressed()` programmatically |
 | Home Assistant | Replace `HomeTool` stub with HA REST API calls, or create an n8n workflow that talks to HA |

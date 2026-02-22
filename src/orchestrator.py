@@ -314,8 +314,7 @@ class Orchestrator:
 
             # 4. Think / generate
             self._transition(State.THINKING)
-            system_prompt = self._build_system_prompt(context_chunks)
-            final_response = self._run_tool_chain(utterance, system_prompt)
+            final_response = self._run_tool_chain(utterance, context_chunks)
 
             if not final_response or self._interrupt_flag.is_set():
                 self._transition(State.IDLE)
@@ -341,21 +340,21 @@ class Orchestrator:
     # Tool chain (CAAL non-streaming pattern)
     # ------------------------------------------------------------------
 
-    def _run_tool_chain(self, utterance: str, system_prompt: str) -> str:
+    def _run_tool_chain(self, utterance: str, context_chunks: List[str]) -> str:
         """
         Run a tool-execution loop:
-          1. Generate with current prompt
+          1. Generate with current prompt (includes RAG context + tool descriptions)
           2. If response contains <tool_call>: execute tool, inject result, loop
           3. If no tool call: strip think tags, return as final response
 
-        Note: we do NOT call llm.reset() here. The system prompt is baked into
-        the binary at startup via --system_prompt CLI arg. Calling reset()
-        destroys the KV cache and the system prompt context. reset() is only
-        used for KV cache error recovery.
+        The system prompt (personality) is baked into the binary at startup
+        via --system_prompt CLI arg. Dynamic context (RAG memory, tool
+        descriptions) is prepended to the user prompt here.
 
         Runs up to config.llm.max_tool_rounds iterations.
         """
-        prompt = utterance
+        context_block = self._build_context_block(context_chunks)
+        prompt = f"{context_block}\n\n{utterance}" if context_block else utterance
 
         for round_num in range(self.config.llm.max_tool_rounds):
             if self._interrupt_flag.is_set():
@@ -541,30 +540,42 @@ class Orchestrator:
         log.debug("State: %s", new_state.name)
 
     # ------------------------------------------------------------------
-    # System prompt builder
+    # Context builder
     # ------------------------------------------------------------------
 
-    def _build_system_prompt(self, context_chunks: List[str]) -> str:
+    def _build_context_block(self, context_chunks: List[str]) -> str:
         """
-        Build the full system prompt by combining:
-          1. Base assistant system prompt (with tool descriptions)
-          2. Relevant memory context (RAG chunks)
-        """
-        base = self.config.assistant.system_prompt
+        Build the dynamic context prepended to the user prompt.
 
-        # Append n8n tool descriptions dynamically to system prompt
+        The base personality prompt is baked into the LLM binary at startup
+        (via --system_prompt in serve.sh). This method builds only the
+        dynamic parts that change per conversation:
+          1. Available tool descriptions (built-in + n8n)
+          2. RAG memory context (retrieved per utterance)
+        """
+        parts: List[str] = []
+
+        # Tool descriptions (built-in + n8n)
+        all_descs = self.tool_registry.get_descriptions()
         if self.config.n8n.enabled:
             n8n_descs = self.n8n.get_descriptions()
-            if n8n_descs:
-                tool_block = "\n".join(
-                    f"Tool: {name}\n{desc}\n"
-                    f"<tool_call>{{\"name\": \"{name}\", \"arguments\": {{...}}}}</tool_call>"
-                    for name, desc in n8n_descs.items()
+            all_descs.update(n8n_descs)
+
+        if all_descs:
+            tool_lines = [
+                "You have tools. To use one, output a <tool_call> block with valid JSON.",
+                "Only call one tool at a time.\n",
+            ]
+            for name, desc in all_descs.items():
+                tool_lines.append(
+                    f"Tool: {name} — {desc}\n"
+                    f'<tool_call>{{"name": "{name}", "arguments": {{...}}}}</tool_call>'
                 )
-                base = f"{base}\n\n{tool_block}"
+            parts.append("\n".join(tool_lines))
 
-        if not context_chunks:
-            return base
+        # RAG memory context
+        if context_chunks:
+            ctx = "\n\n".join(context_chunks)
+            parts.append(f"[Relevant context from memory]\n{ctx}")
 
-        ctx = "\n\n".join(context_chunks)
-        return f"{base}\n\n## Relevant context from memory:\n{ctx}"
+        return "\n\n".join(parts)

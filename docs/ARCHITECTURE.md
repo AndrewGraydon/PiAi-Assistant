@@ -88,7 +88,7 @@ Thin HTTP wrappers around the pre-existing NPU servers. Each client is stateless
 | Client | File | Purpose |
 |---|---|---|
 | `ASRClient` | `asr.py` | POST `/recognize` to Whisper server |
-| `LLMClient` | `llm.py` | reset / generate / poll loop to Qwen3 binary |
+| `LLMClient` | `llm.py` | generate / poll loop to Qwen3 binary (reset for KV recovery only) |
 | `TTSClient` | `tts.py` | POST `/synthesize` to Kokoro server |
 | `DisplayClient` | `display.py` | In-process driver via `WhisPlayBoard` (GPIO/SPI) |
 | `VisionProvider` | `vision.py` | ABC for cloud vision (placeholder default) |
@@ -97,19 +97,24 @@ Thin HTTP wrappers around the pre-existing NPU servers. Each client is stateless
 
 ### LLM Client — Custom Poll Protocol
 
-The Qwen3-4B inference binary (`main_api_axcl_aarch64`) does **not** use the OpenAI API. It uses a bespoke three-step protocol:
+The Qwen3-4B inference binary (`main_api_axcl_aarch64`) does **not** use the OpenAI API. It uses a bespoke protocol:
 
 ```
-POST /api/reset    {"system_prompt": "..."}   ← sets context, called once per query
-POST /api/generate {"prompt": "...", ...}      ← starts generation
-GET  /api/generate_provider  (every 500ms)    ← poll until done=true
+POST /api/reset    {}                          ← clears KV cache, re-prefills --system_prompt
+POST /api/generate {"prompt": "...", ...}      ← starts generation (400 if already running)
+GET  /api/generate_provider  (every 500ms)     ← poll until done=true
   → {"done": false, "response": "partial..."}
   → {"done": true,  "response": "final chunk"}
+POST /api/stop                                 ← abort running generation (404 on old firmware)
 ```
 
-The orchestrator accumulates all `response` chunks. The poll loop checks `interrupt_flag` on every cycle so a button press cancels generation immediately.
+**System prompt is baked at startup:** The `--system_prompt` CLI arg in `services/llm/serve.sh` sets the system prompt once when the binary starts. `/api/reset` does **not** accept a `system_prompt` body — it re-prefills from the CLI arg. The orchestrator does **not** call `reset()` per-conversation; it only calls `reset()` to recover from KV cache errors.
 
-**SetKVCache error:** When the context window is full, the NPU returns `"SetKVCache failed"` in the response text. The client detects this, truncates the response, and logs a warning. The next `reset()` call clears the cache.
+**Dynamic context injection:** Tool descriptions and RAG memory context are prepended to the **user prompt** by `_build_context_block()` in the orchestrator, not injected via the system prompt.
+
+The orchestrator accumulates all `response` chunks. The poll loop checks `interrupt_flag` on every cycle so a button press cancels generation immediately. `generate()` waits for `done=True` (idle) before starting; falls back to `_stop()` if the LLM is busy.
+
+**SetKVCache error:** When the context window (~1024 tokens) is full, the NPU returns `"SetKVCache failed"` in the response text. The client detects this, truncates the response, and auto-calls `reset()` to recover for the next query.
 
 ---
 
@@ -144,7 +149,7 @@ User utterance
  ChromaDB cosine search
       │ top-k chunks above score_threshold
       ▼
- Injected into LLM system_prompt as "## Relevant context from memory:"
+ Injected into user prompt via _build_context_block() as "[Relevant context from memory]"
 ```
 
 **Memory hint auto-store (from CAAL):**

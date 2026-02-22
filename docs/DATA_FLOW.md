@@ -55,11 +55,11 @@ The most common path — user asks a question, assistant responds in speech.
 │                                        ChromaDB.query()             │
 │                                        → top-k context chunks       │
 │                                                      │              │
-│                                        LLMClient.reset(system_prompt│
-│                                        + RAG context)               │
-│                                        POST /api/reset              │
+│                                        _build_context_block()        │
+│                                        (tool descs + RAG context    │
+│                                         prepended to user prompt)   │
 │                                                      │              │
-│                                        LLMClient.generate(utterance)│
+│                                        LLMClient.generate(prompt)   │
 │                                        POST /api/generate           │
 │                                                      │              │
 │                                        ┌──── poll loop (500ms) ────┐│
@@ -120,8 +120,8 @@ Utterance: "What's on my desk?"
 
                     Orchestrator
                          │
-             LLMClient.reset(system_prompt with tool descriptions)
-             LLMClient.generate("What's on my desk?")
+             _build_context_block() → tool descs + RAG context
+             LLMClient.generate(context + "What's on my desk?")
                          │
                     ◄── Qwen3-4B generates ──►
                          │
@@ -196,8 +196,8 @@ Utterance: "Add milk to my shopping list"
 
                     Orchestrator
                          │
-             (n8n tools discovered at startup and injected into system_prompt)
-             LLMClient.generate("Add milk to my shopping list")
+             (n8n tools discovered at startup, injected into user prompt via context block)
+             LLMClient.generate(context + "Add milk to my shopping list")
                          │
               raw_response =
               "<tool_call>
@@ -313,16 +313,15 @@ New utterance: "How do I get to the airport?"
                     Filter below score_threshold (0.65)
                     → chunks: ["User: what time is my flight?...", "flight_number: UA1234"]
                          │
-                    system_prompt =
-                    "{base_prompt}\n\n
-                     ## Relevant context from memory:\n
+                    _build_context_block() prepends to user prompt:
+                    "[Relevant context from memory]
                      User: what time is my flight?\nAssistant: Your flight UA1234 is at 08:00.\n\n
                      flight_number: UA1234"
                          │
-                    LLMClient.reset(system_prompt)
-                    LLMClient.generate("How do I get to the airport?")
+                    LLMClient.generate(context + "How do I get to the airport?")
                          │
                     LLM now knows flight context without being told explicitly
+                    (system prompt is baked at startup; RAG context is in user prompt)
 ```
 
 ---
