@@ -231,7 +231,7 @@ ORCHESTRATOR (src/orchestrator.py)
 
 ## LLM Protocol (non-standard — NOT OpenAI API)
 
-The `main_api_axcl_aarch64` binary (note: **api** in name, **axmodel_num=28**) uses a bespoke protocol:
+The `main_api_axcl_aarch64` binary (note: **api** in name, **axmodel_num=36**) uses a bespoke protocol:
 
 ```
 POST /api/reset    {}                            ← clears KV cache, re-prefills --system_prompt
@@ -379,7 +379,7 @@ Default: `PlaceholderVisionProvider` (returns canned message — no cloud calls)
 - **Very short TTS fragments** (< 2 words) are skipped — Kokoro errors on them.
 - **sentence-transformers** downloads ~90MB model on first run. Set `TRANSFORMERS_OFFLINE=1` in `.env` for air-gapped Pi.
 - **ChromaDB SQLite** requires SQLite ≥ 3.35. If older: `pip install pysqlite3-binary` and monkey-patch in `store.py`.
-- **WhisPlayBoard LCD rendering** uses DejaVuSans font from `/usr/share/fonts/truetype/dejavu/`. Falls back to default PIL font if not found.
+- **WhisPlayBoard LCD rendering** uses NotoSans-Bold for text (`/usr/share/fonts/truetype/noto/`) and DejaVuSans for emoji glyphs (`/usr/share/fonts/truetype/dejavu/`). Falls back through a preference list if fonts are missing. Install `fonts-noto-core` for best results.
 
 ### Logging
 - Format: `%(asctime)s  %(levelname)-8s  %(name)-30s  %(message)s`

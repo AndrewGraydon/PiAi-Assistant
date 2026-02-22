@@ -175,7 +175,7 @@ cd ~/Qwen3-4B
 
 # Download the model archive (check M5Stack documentation for current URL)
 # The archive should contain:
-#   qwen3-4b-ax650/               ← directory with 28 axmodel shards + post model + embed weights
+#   qwen3-4b-ax650/               ← directory with 36 axmodel shards + post model + embed weights
 #   qwen3_tokenizer_uid.py        ← tokenizer server
 #   main_api_axcl_aarch64         ← inference binary (note: "api" in the name)
 ```
@@ -184,7 +184,7 @@ Verify the expected files are present:
 
 ```bash
 ls ~/Qwen3-4B/qwen3-4b-ax650/
-# Expected: qwen3_p128_l0_together.axmodel ... qwen3_p128_l27_together.axmodel  (28 shards)
+# Expected: qwen3_p128_l0_together.axmodel ... qwen3_p128_l35_together.axmodel  (36 shards)
 #           qwen3_post.axmodel
 #           model.embed_tokens.weight.bfloat16.bin
 ```
@@ -255,7 +255,7 @@ The defaults work out of the box. Key settings to consider:
 
 ```yaml
 assistant:
-  name: Jarvis               # Change to your preferred assistant name
+  name: PiAi                 # Change to your preferred assistant name
   system_prompt: |           # Edit to customise personality and available tools
 
 services:
@@ -273,6 +273,10 @@ n8n:
 audio:
   silence_timeout_s: 2.0    # Increase if assistant cuts off before you finish speaking
   vad_aggressiveness: 2     # 0–3; increase if background noise causes false triggers
+  speaker_volume: 100       # Speaker volume 0-100
+
+display:
+  scroll_speed: 3           # LCD text scroll speed in px/frame at 30fps (0 = no scroll)
 
 memory:
   enabled: true
@@ -293,7 +297,9 @@ sudo apt install -y \
     libportaudio2 \
     alsa-utils \
     python3-picamera2 \
-    libasound2-dev
+    libasound2-dev \
+    fonts-noto-core \
+    fonts-dejavu-core
 ```
 
 > `python3-picamera2` must be installed via `apt` — it is not available on PyPI and requires system camera libraries.
@@ -421,7 +427,8 @@ sleep 8
 ./main_api_axcl_aarch64 \
   --url_tokenizer_model http://127.0.0.1:12300 \
   --template_filename_axmodel "qwen3-4b-ax650/qwen3_p128_l%d_together.axmodel" \
-  --axmodel_num 28 \
+  --axmodel_num 36 \
+  --system_prompt "Reply in English. Be concise. /no_think" \
   --filename_post_axmodel qwen3-4b-ax650/qwen3_post.axmodel \
   --filename_tokens_embed qwen3-4b-ax650/model.embed_tokens.weight.bfloat16.bin \
   --tokens_embed_num 151936 \

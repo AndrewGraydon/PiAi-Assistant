@@ -87,7 +87,7 @@ PiAi-Assistant/
 
 ```bash
 # System packages (Pi OS Bookworm)
-sudo apt install python3-picamera2 python3-dev libportaudio2 alsa-utils
+sudo apt install python3-picamera2 python3-dev libportaudio2 alsa-utils fonts-noto-core fonts-dejavu-core
 
 # Create the piAi conda environment
 conda create -n piAi python=3.11 -y
@@ -113,9 +113,11 @@ The NPU services are managed by systemd and start automatically on boot. For a m
 cd ~/Qwen3-4B
 python3 qwen3_tokenizer_uid.py --port 12300 &
 sleep 8
-./main_api_axcl_aarch64 --url_tokenizer_model http://127.0.0.1:12300 \
+./main_api_axcl_aarch64 \
+  --system_prompt "Reply in English. Be concise. /no_think" \
+  --url_tokenizer_model http://127.0.0.1:12300 \
   --template_filename_axmodel "qwen3-4b-ax650/qwen3_p128_l%d_together.axmodel" \
-  --axmodel_num 28 --filename_post_axmodel qwen3-4b-ax650/qwen3_post.axmodel \
+  --axmodel_num 36 --filename_post_axmodel qwen3-4b-ax650/qwen3_post.axmodel \
   --filename_tokens_embed qwen3-4b-ax650/model.embed_tokens.weight.bfloat16.bin \
   --tokens_embed_num 151936 --tokens_embed_size 2560 \
   --use_mmap_load_embed 1 --devices 0 &

@@ -94,7 +94,7 @@ display:
   listen_color: "#00ff00"
   think_color: "#ff6800"
   speak_color: "#0055ff"
-  scroll_speed: 3             # Text scroll speed in px/frame at 15fps (0 = no scroll)
+  scroll_speed: 3             # Text scroll speed in px/frame at 30fps (0 = no scroll)
 
 battery:
   enabled: true
