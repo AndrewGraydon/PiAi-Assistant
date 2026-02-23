@@ -102,7 +102,7 @@ The Qwen3-4B inference binary (`main_api_axcl_aarch64`) does **not** use the Ope
 ```
 POST /api/reset    {}                          ← clears KV cache, re-prefills --system_prompt
 POST /api/generate {"prompt": "...", ...}      ← starts generation (400 if already running)
-GET  /api/generate_provider  (every 500ms)     ← poll until done=true
+GET  /api/generate_provider  (every 150ms)     ← poll until done=true
   → {"done": false, "response": "partial..."}
   → {"done": true,  "response": "final chunk"}
 POST /api/stop                                 ← abort running generation (404 on old firmware)
@@ -124,7 +124,7 @@ The orchestrator accumulates all `response` chunks. The poll loop checks `interr
 - Uses `sounddevice.RawInputStream` at 16kHz, mono, int16
 - Frame size: 480 samples (30ms) — required by webrtcvad
 - VAD loop: tracks `speech_started` flag and `silent_frames` counter
-- Stops after `silence_timeout_s` (default 2s) of continuous silence post-speech
+- Stops after `silence_timeout_s` (default 1.5s) of continuous silence post-speech
 - Auto-detects WM8960 card index from `/proc/asound/cards` (card 2 on this Pi)
 - Uses `plughw:N,0` (not `hw:N,0`) to enable ALSA rate conversion
 

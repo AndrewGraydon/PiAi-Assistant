@@ -29,7 +29,7 @@ The most common path — user asks a question, assistant responds in speech.
 │       │  PCM 16kHz mono int16              webrtcvad 30ms frames    │
 │       │  ◄──────────────────────────────── frame_size=480 samples  │
 │       │                                              │              │
-│       │  [silence detected after 2s]                 │              │
+│       │  [silence detected after 1.5s]               │              │
 │       │                                    record() writes WAV      │
 │       │                                    data/recordings/user_ts.wav│
 │       │                                              │              │
@@ -39,7 +39,7 @@ The most common path — user asks a question, assistant responds in speech.
 │                                                      │              │
 │                                        ASRClient.recognize()        │
 │                                        POST /recognize              │
-│                                        {filePath, base64, language} │
+│                                        {filePath, language}         │
 │                                                      │              │
 │                                        ◄── Whisper NPU (~1-3s) ───► │
 │                                                      │              │
@@ -67,7 +67,7 @@ The most common path — user asks a question, assistant responds in speech.
 │                                           on_progress=callback)     │
 │                                        POST /api/generate           │
 │                                                      │              │
-│                                        ┌──── poll loop (500ms) ────┐│
+│                                        ┌──── poll loop (150ms) ────┐│
 │                                        │ GET /api/generate_provider ││
 │                                        │ on_progress → display text ││
 │                                        │   (streams to text area)   ││
@@ -103,7 +103,7 @@ The most common path — user asks a question, assistant responds in speech.
 
 | Stage | Typical | Notes |
 |---|---|---|
-| User finishes speaking | 2.0s | VAD silence detection |
+| User finishes speaking | 1.5s | VAD silence detection |
 | Whisper ASR | 1–3s | Whisper-Small on NPU |
 | Embedding + RAG | ~150ms | CPU only |
 | LLM 1st sentence generated | 1–3s | ~10 tokens at 3.65 tok/s |
@@ -428,4 +428,4 @@ Render thread (30fps, lcd-render)  [thread-safe lock]
           Sleep until next frame (stop when bottom reached)
 ```
 
-**Streaming flow:** During LLM generation, `on_progress` callback calls `set_response_text(text, follow_tail=True)` on every poll cycle (~500ms). The render thread redraws the text area with scroll snapped to the bottom so the latest text is always visible.
+**Streaming flow:** During LLM generation, `on_progress` callback calls `set_response_text(text, follow_tail=True)` on every poll cycle (~150ms). The render thread redraws the text area with scroll snapped to the bottom so the latest text is always visible.

@@ -145,7 +145,7 @@ All structural config lives here. Secrets (API keys) live only in `.env`.
 
 ```yaml
 services:
-  llm:    host: http://localhost:8000, temperature: 0.7, enable_thinking: false, poll_interval_ms: 500, max_tool_rounds: 5
+  llm:    host: http://localhost:8000, temperature: 0.7, enable_thinking: false, poll_interval_ms: 150, max_tool_rounds: 5
   asr:    host: http://localhost:8801, language: en, timeout_s: 120
   tts:    host: http://localhost:8803, voice: af_heart, speed: 1.0, sample_rate: 24000
   display: host/port unused — display driven via WhisPlayBoard GPIO directly
@@ -157,7 +157,7 @@ n8n:
 
 audio:
   sample_rate: 16000, channels: 1, vad_aggressiveness: 2
-  silence_timeout_s: 2.0, max_record_s: 30
+  silence_timeout_s: 1.5, max_record_s: 30
   device_name: null   # auto-detects WM8960 (card 2 on this Pi)
 
 memory:
@@ -236,7 +236,7 @@ The `main_api_axcl_aarch64` binary (note: **api** in name, **axmodel_num=36**) u
 ```
 POST /api/reset    {}                            ← clears KV cache, re-prefills --system_prompt
 POST /api/generate {"prompt": "...", ...}        ← starts generation (400 if already running)
-GET  /api/generate_provider  (every 500ms)       ← poll until done=true
+GET  /api/generate_provider  (every 150ms)       ← poll until done=true
   → {"done": false, "response": "partial..."}
   → {"done": true,  "response": "final chunk"}
 POST /api/stop                                   ← abort running generation (404 on old firmware)
@@ -251,7 +251,7 @@ POST /api/stop                                   ← abort running generation (4
 **Critical behaviours in `src/services/llm.py`:**
 - `generate()` waits for `done=True` (idle) before starting; falls back to `_stop()` if busy
 - Detects `"SetKVCache failed"` → context window full → auto-calls `reset()` to recover
-- Checks `interrupt_flag` (threading.Event) on every 500ms poll cycle
+- Checks `interrupt_flag` (threading.Event) on every 150ms poll cycle
 - `/no_think` is included in the serve.sh system prompt (not appended at runtime)
 
 ---
@@ -315,8 +315,8 @@ IDLE ──(button)──► RECORDING ──(VAD silence)──► TRANSCRIBING
 
 Button press during THINKING or SPEAKING:
   → interrupt_flag.set() → player.stop() → _transition(IDLE)
-  → LLM poll loop exits on next 500ms cycle
-  → _speak_response() skips remaining sentences
+  → LLM poll loop exits on next 150ms cycle
+  → TTS worker thread drains queue and stops
 ```
 
 ---
@@ -435,5 +435,4 @@ ssh andrew@10.10.0.129 "cat ~/.ssh/id_ed25519.pub"
 | New n8n tool | Create n8n workflow with webhook trigger, add description in node Notes, activate — no code changes needed |
 | Wake word | Add always-on VAD/keyword loop in `src/audio/` and trigger `_on_button_pressed()` programmatically |
 | Home Assistant | Replace `HomeTool` stub with HA REST API calls, or create an n8n workflow that talks to HA |
-| Streaming TTS | Split `_speak_response()` to begin synthesizing first sentence while LLM is still generating |
-| Custom LCD image | Modify `_render_lcd()` in `src/services/display.py` — it has full Pillow image access |
+| Custom LCD image | Modify `_render_header()` / `_render_text_area()` in `src/services/display.py` — full Pillow image access |

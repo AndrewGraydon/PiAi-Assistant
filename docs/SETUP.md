@@ -271,7 +271,7 @@ n8n:
   url: http://localhost:5678
 
 audio:
-  silence_timeout_s: 2.0    # Increase if assistant cuts off before you finish speaking
+  silence_timeout_s: 1.5    # Increase if assistant cuts off before you finish speaking
   vad_aggressiveness: 2     # 0–3; increase if background noise causes false triggers
   speaker_volume: 100       # Speaker volume 0-100
 
