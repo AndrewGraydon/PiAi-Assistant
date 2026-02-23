@@ -8,6 +8,9 @@ Health: GET /health → {"status": "ok"}
 Strategy: pass outputPath in the request so Kokoro saves the WAV file
 directly — avoids base64 encode/decode overhead for audio data (~200KB/sentence).
 Falls back to decoding base64 if the server doesn't honour outputPath.
+
+WAV files are written to /dev/shm (tmpfs) for lower latency than SD card I/O.
+Callers should delete WAV files after playback via cleanup_file().
 """
 
 from __future__ import annotations
@@ -21,6 +24,9 @@ from typing import Optional
 import requests
 
 log = logging.getLogger(__name__)
+
+# Use tmpfs for TTS WAV files — avoids SD card write/read latency (~5-20ms)
+_TMPFS_DIR = "/dev/shm/piAi-tts"
 
 
 class TTSClient:
@@ -40,16 +46,35 @@ class TTSClient:
         self.sample_rate = sample_rate
         self.output_dir = output_dir
 
+        # Prefer tmpfs; fall back to configured output_dir if /dev/shm not writable
+        self._wav_dir = output_dir
+        try:
+            os.makedirs(_TMPFS_DIR, exist_ok=True)
+            self._wav_dir = _TMPFS_DIR
+            log.info("TTS using tmpfs output: %s", _TMPFS_DIR)
+        except OSError:
+            log.info("TTS using disk output: %s (tmpfs not available)", output_dir)
+
+    @staticmethod
+    def cleanup_file(path: str) -> None:
+        """Delete a WAV file after playback. Safe to call with None or missing path."""
+        try:
+            if path and os.path.exists(path):
+                os.unlink(path)
+        except OSError:
+            pass
+
     def synthesize(self, text: str) -> Optional[str]:
         """
         Synthesize text to speech.
         Returns the local path of the generated WAV file, or None on failure.
+        Caller should call cleanup_file() after playback.
         """
         if not text or not text.strip():
             return None
 
         ts = int(time.time() * 1000)
-        out_path = os.path.join(self.output_dir, f"tts_{ts}.wav")
+        out_path = os.path.join(self._wav_dir, f"tts_{ts}.wav")
 
         payload = {
             "sentence": text.strip(),

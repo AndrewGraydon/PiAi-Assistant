@@ -217,7 +217,9 @@ class LLMClient:
                 )
                 break
 
-            time.sleep(self.poll_interval_s)
+            # Sleep AFTER first poll — don't waste 500ms before checking
+            if poll_count > 0:
+                time.sleep(self.poll_interval_s)
             poll_count += 1
 
             try:

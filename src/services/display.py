@@ -168,8 +168,8 @@ def _battery_colour(level: int) -> tuple[int, int, int]:
         return (0xFF, 0x22, 0x22)
 
 
-def _image_to_rgb565(img: "Image.Image") -> list[int]:
-    """Convert a Pillow RGB image to RGB565 byte list using numpy."""
+def _image_to_rgb565(img: "Image.Image") -> bytes:
+    """Convert a Pillow RGB image to RGB565 bytes using numpy (fast path for SPI)."""
     rgb = img.convert("RGB")
     if _NUMPY_AVAILABLE:
         arr = np.array(rgb, dtype=np.uint16)
@@ -179,16 +179,19 @@ def _image_to_rgb565(img: "Image.Image") -> list[int]:
         rgb565 = r | g | b
         high = (rgb565 >> 8).astype(np.uint8)
         low = (rgb565 & 0xFF).astype(np.uint8)
-        return np.dstack((high, low)).flatten().tolist()
+        return np.dstack((high, low)).flatten().tobytes()
     else:
         w, h = rgb.size
-        pixel_data: list[int] = []
+        pixel_data = bytearray(w * h * 2)
+        idx = 0
         for py in range(h):
             for px in range(w):
                 rv, gv, bv = rgb.getpixel((px, py))
                 val = ((rv & 0xF8) << 8) | ((gv & 0xFC) << 3) | (bv >> 3)
-                pixel_data.extend([(val >> 8) & 0xFF, val & 0xFF])
-        return pixel_data
+                pixel_data[idx] = (val >> 8) & 0xFF
+                pixel_data[idx + 1] = val & 0xFF
+                idx += 2
+        return bytes(pixel_data)
 
 
 def _wrap_text(text: str, font: "ImageFont.FreeTypeFont", max_width: int) -> list[str]:
@@ -310,23 +313,22 @@ def _render_header(
 
 def _render_text_area(
     board: "WhisPlayBoard",  # type: ignore
-    text: str,
+    lines: list[str],
     scroll_offset: int = 0,
 ) -> None:
-    """Draw word-wrapped text into the text area region, offset by scroll_offset."""
+    """Draw pre-wrapped text lines into the text area region, offset by scroll_offset."""
     if not _PIL_AVAILABLE:
         return
 
     img = Image.new("RGB", (LCD_WIDTH, TEXT_AREA_HEIGHT), color=(0, 0, 0))
 
-    if not text:
+    if not lines:
         board.draw_image(0, TEXT_AREA_Y, LCD_WIDTH, TEXT_AREA_HEIGHT, _image_to_rgb565(img))
         return
 
     draw = ImageDraw.Draw(img)
     text_font = _get_font(_TEXT_FONT_SIZE)
 
-    lines = _wrap_text(text, text_font, _TEXT_MAX_WIDTH)
     ascent, descent = text_font.getmetrics()
     line_height = ascent + descent + 4
 
@@ -366,6 +368,7 @@ class DisplayClient:
 
         # Scrolling text state
         self._response_text: str = ""
+        self._wrapped_lines: list[str] = []  # cached word-wrapped lines
         self._scroll_offset: int = 0
         self._scroll_speed: int = 0  # pixels per frame (0 = no scrolling)
         self._follow_tail: bool = False  # True during streaming — snap to bottom
@@ -447,7 +450,7 @@ class DisplayClient:
     def _render_loop(self) -> None:
         """Background render loop at 30fps. Sleeps when nothing to animate."""
         while not self._render_stop.is_set():
-            needs_animation = self._scroll_speed > 0 or self._text_dirty
+            needs_animation = self._scroll_speed > 0 or self._text_dirty or self._header_dirty
             self._render_wake.wait(timeout=_RENDER_INTERVAL if needs_animation else 5.0)
             self._render_wake.clear()
 
@@ -472,12 +475,12 @@ class DisplayClient:
                     if self._text_dirty:
                         _render_text_area(
                             self._board,
-                            self._response_text,
+                            self._wrapped_lines,
                             self._scroll_offset,
                         )
                         self._text_dirty = False
 
-                    elif self._scroll_speed > 0 and self._response_text:
+                    elif self._scroll_speed > 0 and self._wrapped_lines:
                         max_scroll = max(0, self._total_text_height - TEXT_AREA_HEIGHT)
                         if self._scroll_offset < max_scroll:
                             self._scroll_offset += self._scroll_speed
@@ -485,7 +488,7 @@ class DisplayClient:
                                 self._scroll_offset = max_scroll
                             _render_text_area(
                                 self._board,
-                                self._response_text,
+                                self._wrapped_lines,
                                 self._scroll_offset,
                             )
                             self._render_wake.set()  # keep scrolling
@@ -493,15 +496,15 @@ class DisplayClient:
                 except Exception as e:
                     log.debug("Render loop error: %s", e)
 
-    def _compute_text_height(self, text: str) -> int:
-        """Compute total pixel height of word-wrapped text."""
+    def _wrap_and_measure(self, text: str) -> tuple[list[str], int]:
+        """Word-wrap text and return (lines, total_pixel_height). Updates cache."""
         if not _PIL_AVAILABLE or not text:
-            return 0
+            return [], 0
         font = _get_font(_TEXT_FONT_SIZE)
         lines = _wrap_text(text, font, _TEXT_MAX_WIDTH)
         ascent, descent = font.getmetrics()
         line_height = ascent + descent + 4
-        return len(lines) * line_height
+        return lines, len(lines) * line_height
 
     # ------------------------------------------------------------------
     # Display updates
@@ -510,6 +513,9 @@ class DisplayClient:
     def send(self, payload: dict) -> None:
         """
         Update header display and RGB LED based on payload. Thread-safe.
+
+        Header rendering is deferred to the render thread to avoid blocking
+        the pipeline. Backlight and RGB LED are set immediately (fast ops).
 
         Understood keys:
             status     -- idle | recording | transcribing | thinking | speaking
@@ -544,19 +550,18 @@ class DisplayClient:
                 if text:
                     self._last_status_text = text
 
-                _render_header(
-                    self._board,
-                    self._last_emoji,
-                    self._last_status_text,
-                    self._battery_level,
-                )
+                # Defer header rendering to the render thread
+                self._header_dirty = True
 
-                # If no response text, clear the text area
+                # If no response text, mark text area for clear
                 if not self._response_text:
-                    _render_text_area(self._board, "", 0)
+                    self._text_dirty = True
 
             except Exception as e:
                 log.warning("Display send error: %s", e)
+
+        # Wake render thread to pick up the changes
+        self._render_wake.set()
 
     def set_response_text(
         self, text: str, scroll_speed: int = 3, follow_tail: bool = False
@@ -578,7 +583,7 @@ class DisplayClient:
             self._follow_tail = follow_tail
 
             if text:
-                self._total_text_height = self._compute_text_height(text)
+                self._wrapped_lines, self._total_text_height = self._wrap_and_measure(text)
 
                 if follow_tail:
                     # Streaming: snap to bottom so latest text is visible
@@ -598,7 +603,9 @@ class DisplayClient:
                 self._total_text_height = 0
                 self._scroll_offset = 0
                 self._follow_tail = False
-                _render_text_area(self._board, "", 0)
+                self._wrapped_lines = []
+                self._text_dirty = True
+                self._render_wake.set()
 
     def update_battery_level(self, level: int) -> None:
         """

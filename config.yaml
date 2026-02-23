@@ -4,7 +4,7 @@ services:
     temperature: 0.7
     top_k: 40
     enable_thinking: false
-    poll_interval_ms: 500
+    poll_interval_ms: 150
     max_tool_rounds: 5            # Max tool-chain iterations per query
 
   asr:
@@ -42,7 +42,7 @@ audio:
   channels: 1
   device_name: null               # null = auto-detect WM8960; or e.g. "plughw:1,0"
   vad_aggressiveness: 2           # 0 (least) to 3 (most aggressive)
-  silence_timeout_s: 2.0
+  silence_timeout_s: 1.5
   max_record_s: 30
   speaker_volume: 100             # Speaker volume 0-100 (mapped to ALSA 0-127)
 

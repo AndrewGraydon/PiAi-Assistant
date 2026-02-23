@@ -377,6 +377,7 @@ class Orchestrator:
                     wav = self.tts.synthesize(clean)
                     if wav and not self._interrupt_flag.is_set():
                         self.player.play(wav)
+                    TTSClient.cleanup_file(wav)
 
             tts_thread = threading.Thread(
                 target=_tts_worker, daemon=True, name="tts-stream"
@@ -496,7 +497,7 @@ class Orchestrator:
                     self._extract_tool_call_block(raw), ""
                 ))
 
-            self.display.send({"text": f"Using {tool_name}..."})
+            self.display.set_response_text(f"Using {tool_name}...")
             log.info("Tool call: %s(%s)", tool_name, json.dumps(tool_args)[:100])
 
             result_str = self.tool_registry.call(tool_name, tool_args)
@@ -621,35 +622,6 @@ class Orchestrator:
         text = re.sub(r"[^\x00-\x7F]+", " ", text)
         text = re.sub(r"\s+", " ", text)
         return text.strip()
-
-    # ------------------------------------------------------------------
-    # Speaking
-    # ------------------------------------------------------------------
-
-    def _speak_response(self, text: str) -> None:
-        """
-        Split text into sentences, synthesize each with TTS, play in order.
-        Checks interrupt_flag before each sentence.
-        """
-        self.display.set_response_text(
-            text, scroll_speed=self.config.display_theme.scroll_speed
-        )
-
-        sentences = self._split_sentences(text)
-        log.debug("Speaking %d sentence(s)", len(sentences))
-
-        for sentence in sentences:
-            if self._interrupt_flag.is_set():
-                break
-
-            clean = self._purify_for_tts(sentence)
-            # Skip fragments that are too short for TTS
-            if len(clean.split()) < 2:
-                continue
-
-            wav_path = self.tts.synthesize(clean)
-            if wav_path and not self._interrupt_flag.is_set():
-                self.player.play(wav_path)
 
     # ------------------------------------------------------------------
     # State transitions

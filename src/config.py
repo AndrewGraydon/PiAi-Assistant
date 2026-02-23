@@ -303,7 +303,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
     )
 
     # ---- Assistant ----
-    asst_raw = raw.get("A", {})
+    asst_raw = raw.get("assistant", {})
     assistant = AssistantConfig(
         name=asst_raw.get("name", "PiAi"),
         system_prompt=asst_raw.get("system_prompt", "You are a helpful assistant.").rstrip(),

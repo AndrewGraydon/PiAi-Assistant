@@ -2,7 +2,10 @@
 ASR (Automatic Speech Recognition) client for PiAi Assistant.
 
 Talks to the whisper.axcl server (port 8801) running on the LLM8850 NPU.
-API: POST /recognize with {filePath, base64} → {recognition: string}
+API: POST /recognize with {filePath, language} → {recognition: string}
+
+The server reads the WAV file directly from disk via filePath — no need to
+send the audio as base64 (they share the same filesystem on localhost).
 
 Error codes:
   429 = service busy (retry)
@@ -12,8 +15,8 @@ Error codes:
 
 from __future__ import annotations
 
-import base64
 import logging
+import os
 import time
 from typing import Optional
 
@@ -30,23 +33,18 @@ class ASRClient:
 
     def recognize(self, wav_path: str) -> str:
         """
-        Send a WAV file to the Whisper ASR server.
+        Send a WAV file path to the Whisper ASR server.
         Returns the transcription string, or "" on failure.
 
-        Sends both filePath and base64 to match the reference implementation.
+        The server reads the file directly from disk — no base64 needed.
         Retries up to 3 times on 429 (busy).
         """
-        try:
-            with open(wav_path, "rb") as f:
-                audio_bytes = f.read()
-        except OSError as e:
-            log.error("Cannot read WAV file %s: %s", wav_path, e)
+        if not os.path.exists(wav_path):
+            log.error("WAV file not found: %s", wav_path)
             return ""
 
-        b64 = base64.b64encode(audio_bytes).decode("ascii")
         payload = {
             "filePath": wav_path,
-            "base64": b64,
             "language": self.language,
         }
 
