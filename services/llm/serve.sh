@@ -71,8 +71,36 @@ echo "System prompt: $SYSTEM_PROMPT"
     --tokens_embed_num 151936 \
     --tokens_embed_size 2560 \
     --use_mmap_load_embed 1 \
-    --devices 0
+    --devices 0 &
+LLM_PID=$!
+
+# Poll port 8000 until the LLM HTTP server is ready (max 240s)
+echo "Waiting for LLM HTTP server on port 8000..."
+for i in $(seq 1 240); do
+    if ! kill -0 $LLM_PID 2>/dev/null; then
+        echo "ERROR: LLM binary exited during init"
+        kill $TOKENIZER_PID 2>/dev/null || true
+        exit 1
+    fi
+    if curl -sf -o /dev/null "http://127.0.0.1:8000/api/generate_provider" 2>/dev/null; then
+        echo "LLM ready after ${i}s — notifying systemd"
+        systemd-notify --ready
+        break
+    fi
+    if [ $i -eq 240 ]; then
+        echo "ERROR: LLM HTTP server not ready after 240s"
+        kill $LLM_PID 2>/dev/null || true
+        kill $TOKENIZER_PID 2>/dev/null || true
+        exit 1
+    fi
+    sleep 1
+done
+
+# Wait for LLM binary to exit (keeps the service running)
+wait $LLM_PID
+LLM_EXIT=$?
 
 # Clean up tokenizer when inference binary exits
 kill $TOKENIZER_PID 2>/dev/null || true
 pkill -f "python qwen3_tokenizer_uid.py --port $PORT" 2>/dev/null || true
+exit $LLM_EXIT

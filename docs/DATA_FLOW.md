@@ -379,7 +379,7 @@ All services ready ──► Orchestrator.run()
      (or RuntimeError if timeout exceeded)
 ```
 
-The NPU services (`piAi-llm`, `piAi-asr`, `piAi-tts`) are managed by systemd and start automatically before `piAi-orchestrator` thanks to `After=` and `Wants=` dependencies in the unit files.
+The NPU services are managed by systemd with sequenced boot ordering. The LLM service uses `Type=notify` — `serve.sh` polls port 8000 and calls `systemd-notify --ready` once the HTTP server responds (~127s). ASR and TTS have `After=piAi-llm.service` so they start only after the LLM signals readiness, preventing NPU VRAM contention. The orchestrator starts last (`After=` all three) and polls internally for up to 180s.
 
 ---
 

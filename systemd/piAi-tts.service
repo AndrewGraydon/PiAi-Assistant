@@ -1,6 +1,6 @@
 [Unit]
 Description=PiAi TTS Service (Kokoro on LLM8850)
-After=network.target
+After=network.target piAi-llm.service
 
 [Service]
 Type=simple

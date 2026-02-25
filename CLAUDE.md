@@ -121,20 +121,21 @@ The `services/*/serve.sh` scripts activate the correct env before starting each 
 
 Four unit files in `systemd/`. All use `User=andrew`, paths under `/home/andrew/`.
 
-| Service | Script | Key timing |
-|---|---|---|
-| `piAi-llm` | `services/llm/serve.sh` | `TimeoutStartSec=300` (LLM init ~2 min) |
-| `piAi-asr` | `services/asr/serve.sh` | `TimeoutStartSec=60` |
-| `piAi-tts` | `services/tts/serve.sh` | `TimeoutStartSec=60` |
-| `piAi-orchestrator` | `main.py` via piAi conda env | `After=` all three above; waits 180s internally |
+**Boot ordering:** The LLM must finish loading (~127s) before ASR/TTS start. Simultaneous NPU init causes VRAM contention and `AX_ENGINE_CreateHandle` failures. The LLM service uses `Type=notify` — `serve.sh` polls port 8000 and calls `systemd-notify --ready` once the HTTP server responds. ASR and TTS have `After=piAi-llm.service` so systemd holds them until the LLM signals readiness.
+
+| Service | Script | Type | Key timing |
+|---|---|---|---|
+| `piAi-llm` | `services/llm/serve.sh` | `notify` | ~127s init, signals ready via `systemd-notify` |
+| `piAi-asr` | `services/asr/serve.sh` | `simple` | `After=piAi-llm.service`, ~10s |
+| `piAi-tts` | `services/tts/serve.sh` | `simple` | `After=piAi-llm.service`, ~10s |
+| `piAi-orchestrator` | `main.py` via piAi conda env | `simple` | `After=` all three above; waits 180s internally |
 
 **To install/update services on Pi:**
 ```bash
 sudo cp ~/PiAi-Assistant/systemd/piAi-*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable piAi-llm piAi-asr piAi-tts piAi-orchestrator
-sudo systemctl restart piAi-llm piAi-asr piAi-tts
-sudo systemctl restart piAi-orchestrator
+sudo systemctl restart piAi-llm piAi-asr piAi-tts piAi-orchestrator
 ```
 
 ---
@@ -373,6 +374,7 @@ Default: `PlaceholderVisionProvider` (returns canned message — no cloud calls)
 - **WM8960 is card index 2** on this Pi (not 1) — recorder auto-detects, but be aware if hardcoding.
 
 ### Common gotchas
+- **AX_ENGINE_CreateHandle errors on boot** — NPU VRAM contention. If all three NPU services (LLM, ASR, TTS) try to init simultaneously, the LLM fails to allocate model handles. Fixed by boot ordering: LLM loads first (`Type=notify`), ASR/TTS start after. If errors persist after reboot, stop all services, wait 15s, start LLM alone first.
 - **SetKVCache failed** — normal after long conversations. LLM context window (~1024 tokens) is full. Detected in `llm.generate()`, auto-calls `reset()` to recover for the next query.
 - **Cosine distance** from ChromaDB is in [0,2] not [0,1]. Conversion: `similarity = 1 - dist/2`.
 - **picamera2** cannot be reused across calls — create a new instance per capture, always call `stop()` + `close()` in a `finally` block.
@@ -416,12 +418,11 @@ ssh andrew@10.10.0.129 "journalctl -u piAi-orchestrator -f"
 ssh andrew@10.10.0.129 "journalctl -u piAi-llm -f"
 ```
 
-### Setting up GitHub SSH on Pi (for git pull)
-The Pi currently has no GitHub SSH key. Use rsync or set one up:
+### GitHub SSH on Pi
+The Pi has an SSH key configured and registered with GitHub. Deploy via git:
 ```bash
-ssh andrew@10.10.0.129 "ssh-keygen -t ed25519 -C 'andrew@aiserver' -f ~/.ssh/id_ed25519 -N ''"
-ssh andrew@10.10.0.129 "cat ~/.ssh/id_ed25519.pub"
-# Add the output key to GitHub → Settings → SSH keys
+git push origin main
+ssh andrew@10.10.0.129 "cd ~/PiAi-Assistant && git pull origin main"
 ```
 
 ---

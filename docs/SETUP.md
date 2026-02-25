@@ -505,12 +505,11 @@ sudo systemctl enable piAi-llm piAi-asr piAi-tts piAi-orchestrator
 ### Start services now
 
 ```bash
-# Start the AI services first (LLM takes ~133s to be ready)
-sudo systemctl start piAi-llm piAi-asr piAi-tts
-
-# Wait ~2 minutes for LLM to initialise, then start orchestrator
-# (or just start it — it polls internally for up to 180s)
-sudo systemctl start piAi-orchestrator
+# Start all services — systemd handles boot ordering automatically.
+# The LLM uses Type=notify: serve.sh signals readiness after port 8000
+# responds (~127s). ASR and TTS wait (After=piAi-llm.service) until the
+# LLM is ready, preventing NPU VRAM contention during init.
+sudo systemctl start piAi-llm piAi-asr piAi-tts piAi-orchestrator
 ```
 
 ### Verify all services are running
@@ -718,7 +717,8 @@ journalctl -u piAi-llm -n 50
 ```
 
 Common causes:
-- **LLM not ready**: It takes ~133s. The orchestrator waits up to 180s. If it still times out, increase `TimeoutStartSec` in `piAi-orchestrator.service`.
+- **LLM not ready**: It takes ~127s. The LLM uses `Type=notify` so ASR/TTS wait automatically. The orchestrator then waits up to 180s for all three. If it still times out, check `journalctl -u piAi-llm` for `AX_ENGINE_CreateHandle` errors.
+- **AX_ENGINE_CreateHandle errors**: NPU VRAM contention. Stop all services (`sudo systemctl stop piAi-orchestrator piAi-llm piAi-asr piAi-tts`), wait 15s, then start again. If persistent, reboot the Pi.
 - **Wrong paths in service files**: Double-check WorkingDirectory and ExecStart paths.
 - **Missing model files**: Verify the axmodel files exist in `~/Qwen3-4B/qwen3-4b-ax650/`.
 

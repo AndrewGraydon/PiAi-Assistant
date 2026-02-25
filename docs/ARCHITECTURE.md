@@ -325,14 +325,14 @@ start.sh
                     (orchestrator then runs its main event loop)
 ```
 
-NPU services are started separately via systemd before the orchestrator:
+NPU services are started sequentially via systemd to avoid VRAM contention during init. The LLM uses `Type=notify` — `serve.sh` polls port 8000 and calls `systemd-notify --ready` once the HTTP server responds. ASR and TTS have `After=piAi-llm.service` so they wait for the LLM to signal readiness before starting.
 
-| Service | Unit file | Start time |
-|---|---|---|
-| `piAi-llm` | `systemd/piAi-llm.service` | ~133s (Qwen3-4B load) |
-| `piAi-asr` | `systemd/piAi-asr.service` | ~10s |
-| `piAi-tts` | `systemd/piAi-tts.service` | ~10s |
-| `piAi-orchestrator` | `systemd/piAi-orchestrator.service` | after all above |
+| Service | Unit file | Type | Start time | Depends on |
+|---|---|---|---|---|
+| `piAi-llm` | `systemd/piAi-llm.service` | `notify` | ~127s (Qwen3-4B load) | — |
+| `piAi-asr` | `systemd/piAi-asr.service` | `simple` | ~10s | piAi-llm ready |
+| `piAi-tts` | `systemd/piAi-tts.service` | `simple` | ~10s | piAi-llm ready |
+| `piAi-orchestrator` | `systemd/piAi-orchestrator.service` | `simple` | after all above | all three above |
 
 ---
 

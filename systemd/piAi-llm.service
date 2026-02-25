@@ -1,10 +1,13 @@
 [Unit]
 Description=PiAi LLM Service (Qwen3-4B on LLM8850)
 After=network.target
-# LLM takes ~2 minutes to initialise — other services start in parallel
+# LLM must finish loading before ASR/TTS start — NPU VRAM contention
+# causes AX_ENGINE_CreateHandle failures if all three init simultaneously.
+# serve.sh sends systemd-notify --ready once port 8000 responds.
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=all
 User=andrew
 Group=andrew
 WorkingDirectory=/home/andrew/PiAi-Assistant
