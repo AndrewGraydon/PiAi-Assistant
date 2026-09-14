@@ -637,12 +637,17 @@ class DisplayClient:
     # Button event listener
     # ------------------------------------------------------------------
 
-    def start_event_listener(self, button_callback: Callable[[], None]) -> None:
+    def start_event_listener(
+        self,
+        button_callback: Callable[[], None],
+        release_callback: Optional[Callable[[], None]] = None,
+    ) -> None:
         """
-        Register the button press callback. The WhisPlayBoard uses GPIO
-        interrupts so no polling thread is needed.
+        Register button press and release callbacks. The WhisPlayBoard uses
+        GPIO interrupts (BOTH edges) so no polling thread is needed.
         """
         self._button_callback = button_callback
+        self._release_callback = release_callback
 
         if not self._connected or self._board is None:
             log.warning(
@@ -659,5 +664,15 @@ class DisplayClient:
                     name="btn-handler",
                 ).start()
 
+        def _on_release() -> None:
+            log.debug("Button released (GPIO interrupt)")
+            if self._release_callback:
+                threading.Thread(
+                    target=self._release_callback,
+                    daemon=True,
+                    name="btn-release",
+                ).start()
+
         self._board.on_button_press(_on_press)
+        self._board.on_button_release(_on_release)
         log.info("Button event listener registered (GPIO interrupt mode)")

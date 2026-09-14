@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Optional
 
@@ -88,10 +89,12 @@ class AudioRecorder:
 
         self._vad = VAD(aggressiveness=vad_aggressiveness)
 
-    def record(self, output_path: str) -> Optional[str]:
+    def record(
+        self, output_path: str, stop_event: Optional["threading.Event"] = None
+    ) -> Optional[str]:
         """
         Record audio from the microphone until:
-          - silence_timeout_s of continuous silence is detected (after speech starts), OR
+          - stop_event is set (push-to-talk: second button press), OR
           - max_record_s total is reached
 
         Writes a WAV file to output_path.
@@ -104,14 +107,11 @@ class AudioRecorder:
             return None
 
         max_frames = int(self.max_record_s * 1000 / _FRAME_MS)
-        max_silent_frames = int(self.silence_timeout_s * 1000 / _FRAME_MS)
 
         frames: list[bytes] = []
-        speech_started = False
-        silent_frames = 0
 
         log.debug(
-            "Recording: device=%s rate=%d frame_size=%d",
+            "Recording (push-to-talk): device=%s rate=%d frame_size=%d",
             self.device_name, self.sample_rate, self.frame_size,
         )
 
@@ -124,34 +124,24 @@ class AudioRecorder:
                 blocksize=self.frame_size,
             ) as stream:
                 for _ in range(max_frames):
+                    if stop_event and stop_event.is_set():
+                        log.debug(
+                            "Stop event received after %d frames", len(frames)
+                        )
+                        break
+
                     frame_bytes, overflowed = stream.read(self.frame_size)
                     if overflowed:
                         log.debug("Audio input overflow (non-fatal)")
 
-                    raw = bytes(frame_bytes)
-                    frames.append(raw)
-
-                    is_speech = self._vad.is_speech(raw, self.sample_rate)
-
-                    if is_speech:
-                        speech_started = True
-                        silent_frames = 0
-                    elif speech_started:
-                        silent_frames += 1
-                        if silent_frames >= max_silent_frames:
-                            log.debug(
-                                "Silence detected after %d frames — stopping",
-                                len(frames),
-                            )
-                            break
+                    frames.append(bytes(frame_bytes))
 
         except Exception as e:
             log.error("Recording error: %s", e)
             return None
 
-        # Need at least a few frames of actual speech
-        if not speech_started or len(frames) < 5:
-            log.info("No speech detected — discarding recording")
+        if len(frames) < 5:
+            log.info("Recording too short — discarding")
             return None
 
         # Write WAV

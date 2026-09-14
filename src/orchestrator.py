@@ -130,6 +130,9 @@ class Orchestrator:
         self.tool_registry = ToolRegistry()
         self.tool_cache = ToolDataCache(max_size=config.tools.data_cache_size)
 
+        # Push-to-talk: second button press stops recording
+        self._recording_stop = threading.Event()
+
         # n8n client (discovers workflows if enabled)
         self.n8n = N8NClient(
             enabled=config.n8n.enabled,
@@ -229,7 +232,10 @@ class Orchestrator:
         self.display.connect_with_retry(max_retries=15, retry_interval_s=3.0)
 
         self._transition(State.IDLE)
-        self.display.start_event_listener(self._on_button_pressed)
+        self.display.start_event_listener(
+            self._on_button_pressed,
+            release_callback=self._on_button_released,
+        )
 
         # Start battery monitor after display is ready (so first update renders)
         if self.battery_monitor:
@@ -262,7 +268,7 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _on_button_pressed(self) -> None:
-        """Called from display listener thread on button_pressed event."""
+        """Called from display listener thread on button press (hold-to-talk)."""
         if self.state == State.IDLE:
             if not self._pipeline_running.is_set():
                 self._pipeline_running.set()
@@ -279,6 +285,12 @@ class Orchestrator:
             self._transition(State.IDLE)
             self._pipeline_running.clear()
 
+    def _on_button_released(self) -> None:
+        """Called from display listener thread on button release (stops recording)."""
+        if self.state == State.RECORDING:
+            log.info("Button released — stopping recording")
+            self._recording_stop.set()
+
     # ------------------------------------------------------------------
     # Pipeline
     # ------------------------------------------------------------------
@@ -286,16 +298,17 @@ class Orchestrator:
     def _pipeline_thread(self) -> None:
         """Full voice pipeline: record → ASR → LLM (with streaming TTS) → IDLE."""
         self._interrupt_flag.clear()
+        self._recording_stop.clear()
         self.tool_cache.clear()
 
         try:
-            # 1. Record
+            # 1. Record (push-to-talk: press button again to stop)
             self._transition(State.RECORDING)
             ts = int(time.time() * 1000)
             wav_path = os.path.join(
                 self.config.paths.recordings_dir, f"user_{ts}.wav"
             )
-            recorded = self.recorder.record(wav_path)
+            recorded = self.recorder.record(wav_path, stop_event=self._recording_stop)
             if not recorded or self._interrupt_flag.is_set():
                 self._transition(State.IDLE)
                 return
